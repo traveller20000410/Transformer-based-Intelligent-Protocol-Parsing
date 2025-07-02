@@ -27,26 +27,6 @@ class CachedDataset(Dataset):
     def __getitem__(self, idx):
         return self.cached_data[idx]
 
-class RelativePositionBias(nn.Module):
-    def __init__(self, num_heads, max_distance=128):
-        super(RelativePositionBias, self).__init__()
-        self.num_heads = num_heads
-        self.max_distance = max_distance
-        self.relative_attention_bias = nn.Embedding(2 * self.max_distance + 1, self.num_heads)
-
-    def forward(self, seq_length):
-        # seq_length 是序列的长度 (L)     # 创建位置索引 [0, 1, ..., L-1]
-        q_pos = torch.arange(seq_length, dtype=torch.long)
-        k_pos = torch.arange(seq_length, dtype=torch.long)
-        relative_position = k_pos[None, :] - q_pos[:, None]
-        # 将相对位置裁剪到 [-max_distance, max_distance] 范围内
-        clipped_relative_position = torch.clamp(relative_position, -self.max_distance, self.max_distance)
-        # 将裁剪后的位置映射到嵌入表的正索引 [0, 2 * max_distance]
-        indices = clipped_relative_position + self.max_distance
-        bias = self.relative_attention_bias(indices.to(next(self.parameters()).device))
-        bias = bias.permute(2, 0, 1).unsqueeze(0)
-        return bias
-
 class GroupedQueryAttention(nn.Module):
     def __init__(self, d_model, num_heads, num_groups):
         super(GroupedQueryAttention, self).__init__()
