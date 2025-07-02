@@ -1,33 +1,30 @@
-import torch,   torchcrf,   torch.onnx,    torch.nn as nn,   torch.nn.functional as F   ,os
-from torch.utils.data import Dataset, DataLoader
-from sklearn.model_selection import train_test_split
+import torch,   torchcrf,   torch.onnx,    torch.nn as nn,      torch.nn.functional as F   ,os
+from torch.utils.data import Dataset, DataLoader;               from sklearn.model_selection import train_test_split
 import numpy as np;     from torch.profiler import profile, ProfilerActivity, schedule, tensorboard_trace_handler
-import time;                                                    import torch.profiler
-from joblib import load
+import time;                                                    from transformer_component import weighted_cross_entropy_loss,check_pth_is_accessible,export_to_onnx,loss_result_plt,preprocess_data
+from joblib import load;                                        from torch.utils.checkpoint import checkpoint
 from sklearn.metrics import classification_report;              from sklearn.utils.class_weight import compute_class_weight # 导入一个方便的工具
-from torch.utils.checkpoint import checkpoint
 from torch.cuda.amp import autocast, GradScaler
-from transformer_component import weighted_cross_entropy_loss,check_pth_is_accessible,export_to_onnx,loss_result_plt,preprocess_data
 from torch.optim.lr_scheduler import StepLR, MultiStepLR, ReduceLROnPlateau, CosineAnnealingLR
 
 # 定义超参数，包括批量大小、训练轮次、学习率等
-BATCH_SIZE =        64;                         EPOCHS =        600
-LEARNING_RATE =     0.0001;                     D_MODEL =       128
-NUM_HEADS =         8;                          NUM_LAYERS =    6
+BATCH_SIZE =        24;                         EPOCHS =        600
+LEARNING_RATE =     0.0001;                     D_MODEL =       32
+NUM_HEADS =         4;                          NUM_LAYERS =    4
 DROPOUT =           0.1 ;                       MAX_LENGTH =    1250
 NUM_GROUPS =        2 ;                         PATIENCE=       30;
 SCHEDULER_PATIENCE=15;
 
-# 自定义数据集类，用于存储协议数据和标签
-class ProtocolDataset(Dataset):
-    def __init__(self, data, labels):
-        self.data = data ;           self.labels = labels
+#缓存数据类
+class CachedDataset(Dataset):
+    def __init__(self, cached_data):
+        self.cached_data = cached_data
+
     def __len__(self):
-        return len(self.data)
+        return len(self.cached_data)
+
     def __getitem__(self, idx):
-        sequence = torch.tensor(self.data[idx], dtype=torch.float32)
-        labels = torch.tensor(self.labels[idx], dtype=torch.long)
-        return sequence, labels
+        return self.cached_data[idx]
 
 class RelativePositionBias(nn.Module):
     def __init__(self, num_heads, max_distance=128):
@@ -165,8 +162,7 @@ class TransformerModel(nn.Module):
             # 输出: [B, d_model, 2500]
             nn.Conv1d(in_channels=d_model, out_channels=d_model, kernel_size=3, stride=2, padding=1),
             nn.BatchNorm1d(d_model),
-            nn.GELU()
-            # 最终输出: [B, d_model, 1250]
+            nn.GELU()   # 最终输出: [B, d_model, 1250]
         )
 
         self.relative_position_bias = RelativePositionBias(num_heads=num_heads)
@@ -246,6 +242,15 @@ def train_model(protocols_dataset, protocol_labels):
     x_train, x_test, y_train, y_test,label_encoder = preprocess_data(protocols_dataset, protocol_labels)
     x_train, x_val, y_train, y_val = train_test_split(x_train, y_train, test_size=0.1, random_state=42)  # 划分验证集
 
+    #数据缓存
+    print("开始预加载并缓存训练数据到内存中...")
+    train_data_cached = [(torch.tensor(x, dtype=torch.float32), torch.tensor(y, dtype=torch.long))for x, y in zip(x_train, y_train)]
+    print("训练数据缓存完成。");         print("开始缓存验证数据...")
+    val_data_cached = [(torch.tensor(x, dtype=torch.float32), torch.tensor(y, dtype=torch.long))for x, y in zip(x_val, y_val)]
+    print("验证数据缓存完成。");         print("开始缓存测试数据...")
+    test_data_cached = [(torch.tensor(x, dtype=torch.float32), torch.tensor(y, dtype=torch.long))for x, y in zip(x_test, y_test)]
+    print("测试数据缓存完成。")
+
     #计算类别权重
     all_train_labels = np.concatenate([y.flatten() for y in y_train])
     class_weights = compute_class_weight('balanced', classes=np.unique(all_train_labels), y=all_train_labels)
@@ -254,11 +259,10 @@ def train_model(protocols_dataset, protocol_labels):
     print(", ".join(f"{label_encoder.classes_[i]}: {w:.4f}"  for i, w in enumerate(class_weights)))
 
     # 创建数据加载器
-    train_dataset = ProtocolDataset(x_train, y_train)
-    val_dataset = ProtocolDataset(x_val, y_val) ; test_dataset = ProtocolDataset(x_test, y_test)
-    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, drop_last=False,num_workers=2, pin_memory=True)
-    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, drop_last=False,num_workers=2, pin_memory=True)
-    test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False, drop_last=False,num_workers=2, pin_memory=True)
+    train_dataset = CachedDataset(train_data_cached);val_dataset = CachedDataset(val_data_cached);test_dataset = CachedDataset(test_data_cached)
+    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True,num_workers=8, pin_memory=True, persistent_workers=True)
+    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False,num_workers=4, pin_memory=True, persistent_workers=True)
+    test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False,num_workers=4, pin_memory=True, persistent_workers=True)
 
     # 初始化模型、损失函数和优化器
     output_dim = len(label_encoder.classes_)  #16
@@ -312,9 +316,11 @@ def train_model(protocols_dataset, protocol_labels):
     # 训练和测试模型
     model.to(device);
     start_time = time.time()
+    torch.backends.cudnn.benchmark = True
     try:
         for epoch in range(start_epoch, EPOCHS):
-            do_profile = (epoch == start_epoch)
+            #do_profile = (epoch == start_epoch)
+            do_profile = False
             train_loss, train_acc = train(model, train_loader, optimizer, device, scaler,scheduler,class_weights_tensor,alpha=0.5, do_profiling=do_profile)
             val_loss, val_acc = test(model, val_loader, device, scaler,weight_tensor=class_weights_tensor, alpha=0.5)  # 验证集评估
             test_loss, test_acc = test(model, test_loader, device, scaler)
@@ -344,7 +350,7 @@ def train_model(protocols_dataset, protocol_labels):
                 # 打印分类报告
                 str_names = label_encoder.classes_.astype(str).tolist()
                 print(f"\n=== Classification Report at Epoch {epoch + 1} ===")
-                print(classification_report(all_trues, all_preds, target_names=str_names))
+                print(classification_report(all_trues, all_preds, target_names=str_names,zero_division=0))
                 print("=== End Report ===\n")
                 model.train()
 
@@ -369,7 +375,7 @@ def train_model(protocols_dataset, protocol_labels):
             # scheduler.step(val_loss)
 
             # 保存检查点
-            if epoch>=1:
+            if epoch % 5 == 0:  # 每5个epoch保存一次
                 torch.save({'epoch': epoch,                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(), 'scheduler_state_dict': scheduler.state_dict(),
                 'scaler_state_dict': scaler.state_dict(),       'best_val_loss': best_val_loss,
@@ -401,7 +407,7 @@ def train_model(protocols_dataset, protocol_labels):
                 train_predictions.extend(pred_seq[:seq_len])
                 train_true_labels.extend(tgt_seq[:seq_len].cpu().numpy())
     print("Training set classification report:")
-    print(classification_report(train_true_labels, train_predictions,target_names=label_encoder.classes_))
+    print(classification_report(train_true_labels, train_predictions,target_names=label_encoder.classes_.astype(str).tolist(),zero_division=0))
     # 在测试集上评估
     test_predictions = [];              test_true_labels = []
     with torch.no_grad():
@@ -415,7 +421,7 @@ def train_model(protocols_dataset, protocol_labels):
                 test_true_labels.extend(tgt_seq[:seq_len].cpu().numpy())
     print("Test set classification report:")
     str_names = [str(c) for c in label_encoder.classes_]
-    print(classification_report(test_true_labels,test_predictions,target_names=str_names))
+    print(classification_report(test_true_labels,test_predictions,target_names=str_names,zero_division=0))
     loss_result_plt(train_losses_per_epoch, val_losses_per_epoch, test_losses_per_epoch) #画出损失函数曲线
 
     return model, label_encoder
@@ -455,9 +461,11 @@ def test(model, test_loader, device, scaler, weight_tensor=None, alpha=0.5):
     return running_loss / len(test_loader), correct / total
 
 def predict_protocol(model, data):
-    device = next(model.parameters()).device  # 自动获取模型所在的设备
+    device = next(model.parameters()).device
     model.eval()
-    data = torch.tensor(np.array(data), dtype=torch.long).unsqueeze(0).to(device)
+    if isinstance(data, np.ndarray):
+        data = torch.from_numpy(data)
+    data = data.long().unsqueeze(0).to(device)
     with torch.no_grad():
         emissions, mask = model(data)
         predicted = model.crf.decode(emissions, mask=mask)[0]
