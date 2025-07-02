@@ -8,12 +8,13 @@ from torch.cuda.amp import autocast, GradScaler
 from torch.optim.lr_scheduler import StepLR, MultiStepLR, ReduceLROnPlateau, CosineAnnealingLR
 
 # 定义超参数，包括批量大小、训练轮次、学习率等
-BATCH_SIZE =        24;                         EPOCHS =        600
-LEARNING_RATE =     0.0001;                     D_MODEL =       32
-NUM_HEADS =         4;                          NUM_LAYERS =    4
-DROPOUT =           0.1 ;                       MAX_LENGTH =    1250
+BATCH_SIZE =        64;                         EPOCHS =        600
+LEARNING_RATE =     0.0001;                     D_MODEL =       128
+NUM_HEADS =         8;                          NUM_LAYERS =    6
+DROPOUT =           0.1;                        MAX_LENGTH =    1250
 NUM_GROUPS =        2 ;                         PATIENCE=       30;
-SCHEDULER_PATIENCE=15;
+INITIAL_ALPHA =     1.0;                        FINAL_ALPHA = 0.1
+ALPHA_DECAY_EPOCHS = EPOCHS*0.7                 #SCHEDULER_PATIENCE=15;
 
 #缓存数据类
 class CachedDataset(Dataset):
@@ -62,6 +63,8 @@ class GroupedQueryAttention(nn.Module):
         self.W_v = nn.Linear(d_model, kv_dim)  # 值变换（分组共享）
         self.W_o = nn.Linear(d_model, d_model)  # 输出变换
 
+        scale = torch.sqrt(torch.tensor(self.head_dim, dtype=torch.float32));   self.register_buffer('scale', scale)
+
     def forward(self, query, key, value, mask=None,pos_bias=None):
         batch_size = query.size(0)
         seq_len = query.size(1)
@@ -78,7 +81,7 @@ class GroupedQueryAttention(nn.Module):
         k = k.repeat_interleave(self.num_heads // self.num_groups, dim=1)  # (batch_size, num_heads, seq_len, head_dim)
         v = v.repeat_interleave(self.num_heads // self.num_groups, dim=1)  # (batch_size, num_heads, seq_len, head_dim)
         # 计算注意力分数
-        scores = torch.matmul(q, k.transpose(-2, -1)) / torch.sqrt(torch.tensor(self.head_dim, dtype=torch.float32))
+        scores = torch.matmul(q, k.transpose(-2, -1)) / self.scale
 
         # 将相对位置偏置项直接加到Attention分数上
         if pos_bias is not None:
@@ -278,7 +281,6 @@ def train_model(protocols_dataset, protocol_labels):
 
     checkpoint_path = 'checkpoint.pth' # 中断时保存的检查点路径
     best_model_path = 'best_transformer_model.pth'
-    decay_factor = 0.8  ;    plateau_counter = 0;
     best_val_loss = float('inf');       start_epoch = 0
     counter = 0  # 记录验证集损失不下降的次数
     train_losses_per_epoch = [];        val_losses_per_epoch = [];     test_losses_per_epoch = []
@@ -321,13 +323,18 @@ def train_model(protocols_dataset, protocol_labels):
         for epoch in range(start_epoch, EPOCHS):
             #do_profile = (epoch == start_epoch)
             do_profile = False
-            train_loss, train_acc = train(model, train_loader, optimizer, device, scaler,scheduler,class_weights_tensor,alpha=0.5, do_profiling=do_profile)
-            val_loss, val_acc = test(model, val_loader, device, scaler,weight_tensor=class_weights_tensor, alpha=0.5)  # 验证集评估
+            # 计算当前epoch的alpha值
+            if epoch < ALPHA_DECAY_EPOCHS:
+                current_alpha = INITIAL_ALPHA - (INITIAL_ALPHA - FINAL_ALPHA) * (epoch / ALPHA_DECAY_EPOCHS)
+            else:
+                current_alpha = FINAL_ALPHA
+            train_loss, train_acc = train(model, train_loader, optimizer, device, scaler,scheduler,class_weights_tensor,alpha=current_alpha, do_profiling=do_profile)
+            val_loss, val_acc = test(model, val_loader, device, scaler,weight_tensor=class_weights_tensor, alpha=current_alpha)  # 验证集评估
             test_loss, test_acc = test(model, test_loader, device, scaler)
             elapsed_time = time.time() - start_time
             train_losses_per_epoch.append(train_loss); val_losses_per_epoch.append(val_loss); test_losses_per_epoch.append(test_loss)
             scheduler.step()  # 更新学习率
-            print(f'/****Epoch {epoch + 1}, Learning Rate: {optimizer.param_groups[0]["lr"]}****/')
+            print(f'/****Epoch {epoch + 1}, Learning Rate: {optimizer.param_groups[0]["lr"]}****/, Alpha: {current_alpha:.3f}****/ ')
             print(f'Epoch {epoch + 1}/{EPOCHS}: Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f}, '
                   f'Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}, Test Loss: {test_loss:.4f}, Test Acc: {test_acc:.4f}')
             print(f"Time elapsed: {elapsed_time:.2f} seconds")
@@ -358,21 +365,20 @@ def train_model(protocols_dataset, protocol_labels):
             if val_loss < best_val_loss:
                 best_val_loss = val_loss;      counter = 0;     plateau_counter=0;
                 torch.save(model.state_dict(), 'best_transformer_model.pth')
+                print(f"New best val_loss: {best_val_loss:.4f}, saved best_transformer.pth")
             else:
-                counter += 1;   plateau_counter+=1;
+                counter += 1;   #plateau_counter+=1;
                 #学习率衰减
-                if plateau_counter >= SCHEDULER_PATIENCE:
-                    for group in optimizer.param_groups:
-                        group['lr'] *= decay_factor
-                    scheduler.base_lrs = [base_lr * decay_factor for base_lr in scheduler.base_lrs]
-                    plateau_counter = 0
-                    print(f"Plateau! lr 和 base_lrs 均乘以 {decay_factor}")
+                # if plateau_counter >= SCHEDULER_PATIENCE:
+                #     for group in optimizer.param_groups:
+                #         group['lr'] *= decay_factor
+                #     scheduler.base_lrs = [base_lr * decay_factor for base_lr in scheduler.base_lrs]
+                #     plateau_counter = 0
+                #     print(f"Plateau! lr 和 base_lrs 均乘以 {decay_factor}")
                 #早停
                 if counter >= PATIENCE:
                     print("Early stopping")
                     break
-            # # 更新学习率调度器
-            # scheduler.step(val_loss)
 
             # 保存检查点
             if epoch % 5 == 0:  # 每5个epoch保存一次
