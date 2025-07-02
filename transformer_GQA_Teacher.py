@@ -263,7 +263,7 @@ def train_model(protocols_dataset, protocol_labels):
 
     # 创建数据加载器
     train_dataset = CachedDataset(train_data_cached);val_dataset = CachedDataset(val_data_cached);test_dataset = CachedDataset(test_data_cached)
-    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True,num_workers=8, pin_memory=True, persistent_workers=True)
+    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True,num_workers=4, pin_memory=True, persistent_workers=True)
     val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False,num_workers=4, pin_memory=True, persistent_workers=True)
     test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False,num_workers=4, pin_memory=True, persistent_workers=True)
 
