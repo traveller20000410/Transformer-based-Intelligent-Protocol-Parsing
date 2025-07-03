@@ -196,7 +196,7 @@ def test_with_sequence(model, label_encoder, sequence_length=1024):
 #     plt.show()
 
 def main():
-    train_transformer_model(num_datasets=100)
+    train_transformer_model(num_datasets=600)
     # test_model(flag="te",num_datasets=None)
 
 if __name__ == "__main__":

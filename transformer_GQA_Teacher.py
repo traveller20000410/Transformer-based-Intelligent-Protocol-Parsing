@@ -1,20 +1,20 @@
 import torch,   torchcrf,   torch.onnx,    torch.nn as nn,      torch.nn.functional as F   ,os
 from torch.utils.data import Dataset, DataLoader;               from sklearn.model_selection import train_test_split
 import numpy as np;     from torch.profiler import profile, ProfilerActivity, schedule, tensorboard_trace_handler
-import time;                                                    from transformer_component import weighted_cross_entropy_loss,check_pth_is_accessible,export_to_onnx,loss_result_plt,preprocess_data
+import time;      import math;                                  from transformer_component import weighted_cross_entropy_loss,check_pth_is_accessible,export_to_onnx,loss_result_plt,preprocess_data
 from joblib import load;                                        from torch.utils.checkpoint import checkpoint
 from sklearn.metrics import classification_report;              from sklearn.utils.class_weight import compute_class_weight # 导入一个方便的工具
-from torch.cuda.amp import autocast, GradScaler
+from torch.cuda.amp import autocast, GradScaler;                from flash_attn import flash_attn_func
 from torch.optim.lr_scheduler import StepLR, MultiStepLR, ReduceLROnPlateau, CosineAnnealingLR
 
 # 定义超参数，包括批量大小、训练轮次、学习率等
-BATCH_SIZE =        64;                         EPOCHS =        600
+BATCH_SIZE =        128;                        EPOCHS =        500
 LEARNING_RATE =     0.0001;                     D_MODEL =       128
 NUM_HEADS =         8;                          NUM_LAYERS =    6
 DROPOUT =           0.1;                        MAX_LENGTH =    1250
-NUM_GROUPS =        2 ;                         PATIENCE=       30;
-INITIAL_ALPHA =     1.0;                        FINAL_ALPHA = 0.1
-ALPHA_DECAY_EPOCHS = EPOCHS*0.7                 #SCHEDULER_PATIENCE=15;
+NUM_GROUPS =        2 ;                         PATIENCE=       20;
+INITIAL_ALPHA =     1.0;                        FINAL_ALPHA = 0.2
+ALPHA_DECAY_EPOCHS = EPOCHS * 0.7               #SCHEDULER_PATIENCE=15;
 
 #缓存数据类
 class CachedDataset(Dataset):
@@ -27,57 +27,80 @@ class CachedDataset(Dataset):
     def __getitem__(self, idx):
         return self.cached_data[idx]
 
+class RotaryEmbedding(nn.Module):
+    def __init__(self, dim, max_position_embeddings=MAX_LENGTH):
+        super().__init__()
+        inv_freq = 1.0 / (10000 ** (torch.arange(0, dim, 2).float() / dim))
+        positions = torch.arange(max_position_embeddings, dtype=torch.float32)
+        sinusoid_inp = torch.einsum("i,j->ij", positions, inv_freq)  # [L, d/2]
+        self.register_buffer("cos_cached", torch.cos(sinusoid_inp).half()) # 直接用 half 存
+        self.register_buffer("sin_cached", torch.sin(sinusoid_inp).half())
+
+    def forward(self, seq_len):
+        # 返回 [1, 1, L, d/2] 形式的 cos/sin
+        cos = self.cos_cached[:seq_len].unsqueeze(0).unsqueeze(0)
+        sin = self.sin_cached[:seq_len].unsqueeze(0).unsqueeze(0)
+        return cos, sin
+
+def apply_rotary_pos_emb(q, k, cos, sin):
+    # q, k: [B, H, L, Dh], cos/sin: [1,1,L, Dh/ head?] 注意Dh=head_dim
+    # 先把最后一维一分为二
+    q1, q2 = q[..., ::2], q[..., 1::2]
+    k1, k2 = k[..., ::2], k[..., 1::2]
+    # 交替旋转
+    q_rot = torch.cat([q1 * cos - q2 * sin,
+                       q1 * sin + q2 * cos], dim=-1)
+    k_rot = torch.cat([k1 * cos - k2 * sin,
+                       k1 * sin + k2 * cos], dim=-1)
+    return q_rot, k_rot
+
 class GroupedQueryAttention(nn.Module):
-    def __init__(self, d_model, num_heads, num_groups):
-        super(GroupedQueryAttention, self).__init__()
+    def __init__(self, d_model, num_heads, num_groups, max_position_embeddings=MAX_LENGTH):
+        super().__init__()
         self.d_model = d_model
         self.num_heads = num_heads
         self.num_groups = num_groups
         self.head_dim = d_model // num_heads
-        # 确保分组数量能够整除注意力头数
-        assert num_heads % num_groups == 0, "num_heads must be divisible by num_groups"
-        kv_dim = self.num_groups * self.head_dim
-        # 线性变换层
-        self.W_q = nn.Linear(d_model, d_model)  # 查询变换
-        self.W_k = nn.Linear(d_model, kv_dim)  # 键变换（分组共享）
-        self.W_v = nn.Linear(d_model, kv_dim)  # 值变换（分组共享）
-        self.W_o = nn.Linear(d_model, d_model)  # 输出变换
+        assert num_heads % num_groups == 0
+        kv_dim = num_groups * self.head_dim
 
-        scale = torch.sqrt(torch.tensor(self.head_dim, dtype=torch.float32));   self.register_buffer('scale', scale)
+        self.W_q = nn.Linear(d_model, d_model)
+        self.W_k = nn.Linear(d_model, kv_dim)
+        self.W_v = nn.Linear(d_model, kv_dim)
+        self.W_o = nn.Linear(d_model, d_model)
 
-    def forward(self, query, key, value, mask=None,pos_bias=None):
-        batch_size = query.size(0)
-        seq_len = query.size(1)
+        self.register_buffer('scale', torch.sqrt(torch.tensor(self.head_dim, dtype=torch.float32)))
+        self.rotary_emb = RotaryEmbedding(self.head_dim, max_position_embeddings)
 
-        # 线性变换
-        q = self.W_q(query)  # (batch_size, seq_len, d_model)
-        k = self.W_k(key)    # (batch_size, seq_len, d_model // num_groups)
-        v = self.W_v(value)  # (batch_size, seq_len, d_model // num_groups)
-        # 重塑为多头形式
-        q = q.view(batch_size,seq_len, self.num_heads, self.head_dim).transpose(1, 2)  # (batch_size, num_heads, seq_len, head_dim)
-        k = k.view(batch_size,seq_len, self.num_groups, self.head_dim).transpose(1, 2)  # (batch_size, num_groups, seq_len, head_dim)
-        v = v.view(batch_size,seq_len, self.num_groups, self.head_dim).transpose(1, 2)  # (batch_size, num_groups, seq_len, head_dim)
-        # 广播键和值到每个查询组
-        k = k.repeat_interleave(self.num_heads // self.num_groups, dim=1)  # (batch_size, num_heads, seq_len, head_dim)
-        v = v.repeat_interleave(self.num_heads // self.num_groups, dim=1)  # (batch_size, num_heads, seq_len, head_dim)
-        # 计算注意力分数
-        scores = torch.matmul(q, k.transpose(-2, -1)) / self.scale
-
-        # 将相对位置偏置项直接加到Attention分数上
-        if pos_bias is not None:
-            scores += pos_bias
-
+    def forward(self, query, key, value, mask=None):
+        B, L, _ = query.size()
+        # 1. 线性 + reshape
+        q = self.W_q(query).view(B, L, self.num_heads, self.head_dim).transpose(1,2)
+        k = self.W_k(key)  .view(B, L, self.num_groups, self.head_dim).transpose(1,2)
+        v = self.W_v(value).view(B, L, self.num_groups, self.head_dim).transpose(1,2)
+        k = k.repeat_interleave(self.num_heads // self.num_groups, dim=1)
+        v = v.repeat_interleave(self.num_heads // self.num_groups, dim=1)
+        # 2. RoPE 位置编码
+        cos, sin = self.rotary_emb(L)         # [1,1,L, head_dim/2]
+        q, k = apply_rotary_pos_emb(q, k, cos, sin)
+        # 3. mask → attn_bias
         if mask is not None:
-            mask = mask.unsqueeze(1).unsqueeze(-1)  # 扩展 mask 维度
-            scores = scores.masked_fill(mask.to(torch.bool) == 0, -1e4)  # 应用 mask
-        # 计算注意力权重
-        attn_weights = F.softmax(scores, dim=-1)
-        # 计算注意力输出
-        attn_output = torch.matmul(attn_weights, v)  # (batch_size, num_heads, seq_len, head_dim)
-        attn_output = attn_output.transpose(1, 2).contiguous().view(batch_size, -1, self.d_model)  # (batch_size, seq_len, d_model)
-        # 输出变换
-        output = self.W_o(attn_output)
-        return output, attn_weights
+            mask_bias = (~mask).view(B,1,1,L).to(q.dtype) * -1e4
+            attn_bias = mask_bias.repeat(1, self.num_heads, L, 1)
+        else:
+            attn_bias = None
+        # 4. 调用 FlashAttention（不再传 pos_bias）
+        out = flash_attn_func(
+            q, k, v,
+            dropout_p=0.0,
+            softmax_scale=None,
+            causal=False,
+            window_size=(-1, -1)  # (-1,-1) 表示不限制窗口，即 global attention
+        )
+        # 5. reshape + 输出投影
+        out = out.transpose(1,2).reshape(B, L, self.d_model)
+        return self.W_o(out)
+
 
 # 前馈网络类
 class FeedForward(nn.Module):
@@ -96,20 +119,18 @@ class FeedForward(nn.Module):
 
 # Transformer 编码器层类
 class TransformerEncoderLayer(nn.Module):
-    def __init__(self, d_model, num_heads, dropout, num_groups,relative_position_bias):
+    def __init__(self, d_model, num_heads, dropout, num_groups):
         super(TransformerEncoderLayer, self).__init__()
         self.attention = GroupedQueryAttention(d_model, num_heads, num_groups)
         self.ffn = FeedForward(d_model)
         self.norm1 = nn.LayerNorm(d_model);     self.norm2 = nn.LayerNorm(d_model)
         self.dropout_attn = nn.Dropout(dropout)
-        self.relative_position_bias = relative_position_bias
 
     def forward(self, x, mask=None):
         def custom_forward(x):
             # 先归一化，再进Attention
             norm_x = self.norm1(x)
-            pos_bias = self.relative_position_bias(norm_x.size(1))
-            attn_output, _ = self.attention(norm_x, norm_x, norm_x, mask, pos_bias=pos_bias)
+            attn_output = self.attention(norm_x, norm_x, norm_x, mask)
             x = x + self.dropout_attn(attn_output)
             norm_x2 = self.norm2(x)
             ffn_output = self.ffn(norm_x2)
@@ -120,9 +141,9 @@ class TransformerEncoderLayer(nn.Module):
         return x
 
 class TransformerEncoder(nn.Module):
-    def __init__(self, num_layers, d_model, num_heads, dropout, num_groups, relative_position_bias):
+    def __init__(self, num_layers, d_model, num_heads, dropout, num_groups):
         super(TransformerEncoder, self).__init__()
-        self.layers = nn.ModuleList([TransformerEncoderLayer(d_model, num_heads, dropout, num_groups, relative_position_bias) for _ in range(num_layers)])
+        self.layers = nn.ModuleList([TransformerEncoderLayer(d_model, num_heads, dropout, num_groups) for _ in range(num_layers)])
 
     def forward(self, x, mask=None):
         for layer in self.layers:  x = layer(x, mask)
@@ -148,8 +169,7 @@ class TransformerModel(nn.Module):
             nn.GELU()   # 最终输出: [B, d_model, 1250]
         )
 
-        self.relative_position_bias = RelativePositionBias(num_heads=num_heads)
-        self.encoder = TransformerEncoder(num_layers, d_model, num_heads, dropout, num_groups, self.relative_position_bias)
+        self.encoder = TransformerEncoder(num_layers, d_model, num_heads, dropout, num_groups)
         self.fc = nn.Linear(d_model, output_dim)
         self.crf = torchcrf.CRF(output_dim, batch_first=True)  # 添加 CRF 层
 
@@ -243,7 +263,7 @@ def train_model(protocols_dataset, protocol_labels):
 
     # 创建数据加载器
     train_dataset = CachedDataset(train_data_cached);val_dataset = CachedDataset(val_data_cached);test_dataset = CachedDataset(test_data_cached)
-    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True,num_workers=8, pin_memory=True, persistent_workers=True)
+    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True,num_workers=4, pin_memory=True, persistent_workers=True)
     val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False,num_workers=4, pin_memory=True, persistent_workers=True)
     test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False,num_workers=4, pin_memory=True, persistent_workers=True)
 
