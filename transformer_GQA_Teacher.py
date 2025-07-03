@@ -8,7 +8,7 @@ from torch.cuda.amp import autocast, GradScaler;                from torch.nn.fu
 from torch.optim.lr_scheduler import StepLR, MultiStepLR, ReduceLROnPlateau, CosineAnnealingLR
 
 # 定义超参数，包括批量大小、训练轮次、学习率等
-BATCH_SIZE =        128;                        EPOCHS =        500
+BATCH_SIZE =        64;                         EPOCHS =        500
 LEARNING_RATE =     0.0001;                     D_MODEL =       128
 NUM_HEADS =         8;                          NUM_LAYERS =    6
 DROPOUT =           0.1;                        MAX_LENGTH =    1250
