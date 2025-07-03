@@ -4,7 +4,7 @@ import numpy as np;     from torch.profiler import profile, ProfilerActivity, sc
 import time;      import math;                                  from transformer_component import weighted_cross_entropy_loss,check_pth_is_accessible,export_to_onnx,loss_result_plt,preprocess_data
 from joblib import load;                                        from torch.utils.checkpoint import checkpoint
 from sklearn.metrics import classification_report;              from sklearn.utils.class_weight import compute_class_weight # 导入一个方便的工具
-from torch.cuda.amp import autocast, GradScaler;                from flash_attn import flash_attn_func
+from torch.cuda.amp import autocast, GradScaler;                from torch.nn.functional import scaled_dot_product_attention
 from torch.optim.lr_scheduler import StepLR, MultiStepLR, ReduceLROnPlateau, CosineAnnealingLR
 
 # 定义超参数，包括批量大小、训练轮次、学习率等
@@ -48,10 +48,8 @@ def apply_rotary_pos_emb(q, k, cos, sin):
     q1, q2 = q[..., ::2], q[..., 1::2]
     k1, k2 = k[..., ::2], k[..., 1::2]
     # 交替旋转
-    q_rot = torch.cat([q1 * cos - q2 * sin,
-                       q1 * sin + q2 * cos], dim=-1)
-    k_rot = torch.cat([k1 * cos - k2 * sin,
-                       k1 * sin + k2 * cos], dim=-1)
+    q_rot = torch.cat([q1 * cos - q2 * sin, q1 * sin + q2 * cos], dim=-1)
+    k_rot = torch.cat([k1 * cos - k2 * sin, k1 * sin + k2 * cos], dim=-1)
     return q_rot, k_rot
 
 class GroupedQueryAttention(nn.Module):
@@ -74,31 +72,40 @@ class GroupedQueryAttention(nn.Module):
 
     def forward(self, query, key, value, mask=None):
         B, L, _ = query.size()
-        # 1. 线性 + reshape
-        q = self.W_q(query).view(B, L, self.num_heads, self.head_dim).transpose(1,2)
-        k = self.W_k(key)  .view(B, L, self.num_groups, self.head_dim).transpose(1,2)
-        v = self.W_v(value).view(B, L, self.num_groups, self.head_dim).transpose(1,2)
+        # 1) Linear → reshape → (B, heads, L, head_dim)
+        q = self.W_q(query).view(B, L, self.num_heads, self.head_dim).transpose(1, 2)
+        k = self.W_k(key)  .view(B, L, self.num_groups, self.head_dim).transpose(1, 2)
+        v = self.W_v(value).view(B, L, self.num_groups, self.head_dim).transpose(1, 2)
+        # expand k/v from num_groups→num_heads
         k = k.repeat_interleave(self.num_heads // self.num_groups, dim=1)
         v = v.repeat_interleave(self.num_heads // self.num_groups, dim=1)
-        # 2. RoPE 位置编码
-        cos, sin = self.rotary_emb(L)         # [1,1,L, head_dim/2]
+        # 2) RoPE
+        cos, sin = self.rotary_emb(L)            # 均是 half
+        cos, sin = cos.to(q.dtype), sin.to(q.dtype)
         q, k = apply_rotary_pos_emb(q, k, cos, sin)
-        # 3. mask → attn_bias
+        # 3) 构造 attn_mask（bool）
+        attn_mask = None
         if mask is not None:
-            mask_bias = (~mask).view(B,1,1,L).to(q.dtype) * -1e4
-            attn_bias = mask_bias.repeat(1, self.num_heads, L, 1)
-        else:
-            attn_bias = None
-        # 4. 调用 FlashAttention（不再传 pos_bias）
-        out = flash_attn_func(
+            # mask: (B, L)  → (B, heads, L, L) → (B*heads, L, L)
+            m = ~mask                                      # True 表示“屏蔽”
+            m = m.view(B, 1, 1, L).expand(B, self.num_heads, L, L)
+            attn_mask = m.reshape(B * self.num_heads, L, L)
+        # 4) fold batch&head 维度，用于 scaled_dot_product_attention
+        q = q.transpose(1, 2).reshape(B * self.num_heads, L, self.head_dim)
+        k = k.transpose(1, 2).reshape(B * self.num_heads, L, self.head_dim)
+        v = v.transpose(1, 2).reshape(B * self.num_heads, L, self.head_dim)
+
+        # 5) 调用 PyTorch+Triton 的 FlashAttention-2 内核
+        out = scaled_dot_product_attention(
             q, k, v,
+            attn_mask=attn_mask,
             dropout_p=0.0,
-            softmax_scale=None,
-            causal=False,
-            window_size=(-1, -1)  # (-1,-1) 表示不限制窗口，即 global attention
+            is_causal=False
         )
-        # 5. reshape + 输出投影
-        out = out.transpose(1,2).reshape(B, L, self.d_model)
+        # 6) restore shape → (B, L, d_model) → 输出投影
+        out = out.reshape(B, self.num_heads, L, self.head_dim) \
+                 .transpose(1, 2) \
+                 .reshape(B, L, self.d_model)
         return self.W_o(out)
 
 
