@@ -21,20 +21,19 @@ LABEL_MAP = {
 # 默认配置 (无变化)
 DEFAULT_I2C_CONFIG = {
     'voltage_high': 3.3, 'voltage_low': 0.0,
-    'voltage_noise_std': 0.03,
-    'jitter_std_factor': 0.02,
+    'voltage_noise_std': 0.03, 'jitter_std_factor': 0.02,
     'rise_time_factor': 0.05, 'fall_time_factor': 0.05,
     'prob_write': 0.4, 'prob_read': 0.4, 'prob_write_read': 0.2,
     'prob_10bit_addr': 0.2, 'prob_addr_nack': 0.1, 'prob_data_nack': 0.1,
     'length_jitter_prob': 0.05, 'length_jitter_range': 0.1,
-    'idle_bits_min': 1, 'idle_bits_max': 10,
+    'idle_bits_min': 1, 'idle_bits_max': 10,'swap_channels_prob': 0.5,
     'max_write_bytes': 9, 'max_read_bytes': 9,
     'scl_freq_options': {
-        100e3: 0.4,  # 标准模式 100kbps，40%概率
-        400e3: 0.2,  # 快速模式 400kbps，30%概率
+        100e3: 0.3,  # 标准模式 100kbps，40%概率
+        400e3: 0.1,  # 快速模式 400kbps，30%概率
         1e6: 0.1,  # 快速+模式 1Mbps，15%概率
-        3.4e6: 0.2,  # 高速模式 3.4Mbps，10%概率
-        5e6: 0.1,  # 超高速模式 5Mbps，5%概率
+        3.4e6: 0.3,  # 高速模式 3.4Mbps，10%概率
+        5e6: 0.2,  # 超高速模式 5Mbps，5%概率
     },
     # 添加可用的采样率选项
     'sampling_rate_options': [
@@ -402,6 +401,9 @@ class RealisticI2CSignalGenerator:
         all_datasets, all_labels, all_events = [], [], []
         for _ in range(num_datasets):
             s, d, l, ev = self.generate_i2c_transaction()
+            # --- 随机交换通道 ---
+            if np.random.rand() < self.config.get('swap_channels_prob', 0):
+                s, d = d, s
             current_len = len(s)
             if current_len > samples_per_dataset:
                 print(f"Warning: A single I2C transaction ({current_len} samples) "
@@ -510,22 +512,22 @@ if __name__ == '__main__':
     gen = RealisticI2CSignalGenerator(config=DEFAULT_I2C_CONFIG)
     print("Generating dataset...")
     # generate_i2c_datasets 现在返回3个值
-    all_data, all_labels, all_events = gen.generate_i2c_datasets(num_datasets=50, samples_per_dataset=10000)
+    all_data, all_labels, all_events = gen.generate_i2c_datasets(num_datasets=20, samples_per_dataset=10000)
 
-    # # 循环保存每个生成的数据集
-    # for i in range(len(all_data)):
-    #     data_sample = all_data[i]
-    #     label_sample = all_labels[i]
-    #     event_sample = all_events[i]
-    #
-    #     # 从堆叠的数组中分离出SCL和SDA，以便保存
-    #     scl = data_sample[:, 0]
-    #     sda = data_sample[:, 1]
-    #
-    #     # 调用保存函数
-    #     gen.save_dataset(scl, sda, label_sample, event_sample, base_dir=output_dir, prefix="i2c")
-    #
-    # print("\nDone.")
+    # 循环保存每个生成的数据集
+    for i in range(len(all_data)):
+        data_sample = all_data[i]
+        label_sample = all_labels[i]
+        event_sample = all_events[i]
+
+        # 从堆叠的数组中分离出SCL和SDA，以便保存
+        scl = data_sample[:, 0]
+        sda = data_sample[:, 1]
+
+        # 调用保存函数
+        gen.save_dataset(scl, sda, label_sample, event_sample, base_dir=output_dir, prefix="i2c")
+
+    print("\nDone.")
 
     # 可选：画出最后一个生成的数据图以供检查
     # gen.plot_signals(all_data[-1][:, 0], all_data[-1][:, 1], all_labels[-1], title="Last Generated I2C Signal")
