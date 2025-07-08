@@ -252,32 +252,86 @@ def train(model, train_loader, optimizer, device,scaler,scheduler,weight_tensor=
 
 
 def train_model(protocols_dataset, protocol_labels):
-    # 数据预处理
+    print("Converting list of arrays to a single large NumPy array...")
+    try:
+        all_data_np = np.array(protocols_dataset)  # 预期形状: [N, 10000, 2]
+        all_labels_np = np.array(protocol_labels)  # 预期形状: [N, 1250]
+        assert all_data_np.ndim == 3, "Data should be a 3D array."
+        assert all_labels_np.ndim == 2, "Labels should be a 2D array."
+        print(f"Conversion successful. Data shape: {all_data_np.shape}, Labels shape: {all_labels_np.shape}")
+    except ValueError as e:
+        print(
+            "\n[ERROR] Failed to convert list to NumPy array. This usually happens if the arrays in the list have different shapes.")
+        print("Please ensure all generated data samples have the same length.")
+        print(f"Original error: {e}")
+        # 找出第一个形状不匹配的样本
+        first_shape_data = protocols_dataset[0].shape
+        for i, arr in enumerate(protocols_dataset):
+            if arr.shape != first_shape_data:
+                print(f"Shape mismatch found at index {i}: expected {first_shape_data}, got {arr.shape}")
+                break
+        return None, None  # 提前退出
+
+    # 直接在NumPy数组上进行高效的 train/val/test 分割
+    print("Splitting dataset into training, validation, and test sets...")
+    indices = np.arange(all_data_np.shape[0])
+    train_val_indices, test_indices = train_test_split(indices, test_size=0.15, random_state=42, shuffle=True)
+    train_indices, val_indices = train_test_split(train_val_indices, test_size=0.1, random_state=42, shuffle=True)
+
+    # 用索引来获取分割后的数据，这比直接分割数据本身更高效
+    x_train_np, y_train_np = all_data_np[train_indices], all_labels_np[train_indices]
+    x_val_np, y_val_np = all_data_np[val_indices], all_labels_np[val_indices]
+    x_test_np, y_test_np = all_data_np[test_indices], all_labels_np[test_indices]
+
+    # 释放原始大数组的内存
+    del all_data_np, all_labels_np, protocols_dataset, protocol_labels
+    import gc
+    gc.collect()
+    print("Splitting complete and original data memory released.")
+
+    from sklearn.preprocessing import LabelEncoder
+    label_encoder = LabelEncoder()
+    # 这里的 all_train_labels 来自 y_train_np，而不是原始的 y_train 列表
+    all_train_labels_flat = y_train_np.flatten()
+    label_encoder.fit(all_train_labels_flat)  # 确保编码器被fit
+
+    class_weights = compute_class_weight('balanced', classes=np.unique(all_train_labels_flat), y=all_train_labels_flat)
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    x_train, x_test, y_train, y_test,label_encoder = preprocess_data(protocols_dataset, protocol_labels)
-    x_train, x_val, y_train, y_val = train_test_split(x_train, y_train, test_size=0.1, random_state=42)  # 划分验证集
-
-    #数据缓存
-    print("开始预加载并缓存训练数据到内存中...")
-    train_data_cached = [(torch.tensor(x, dtype=torch.float32), torch.tensor(y, dtype=torch.long))for x, y in zip(x_train, y_train)]
-    print("训练数据缓存完成。");         print("开始缓存验证数据...")
-    val_data_cached = [(torch.tensor(x, dtype=torch.float32), torch.tensor(y, dtype=torch.long))for x, y in zip(x_val, y_val)]
-    print("验证数据缓存完成。");         print("开始缓存测试数据...")
-    test_data_cached = [(torch.tensor(x, dtype=torch.float32), torch.tensor(y, dtype=torch.long))for x, y in zip(x_test, y_test)]
-    print("测试数据缓存完成。")
-
-    #计算类别权重
-    all_train_labels = np.concatenate([y.flatten() for y in y_train])
-    class_weights = compute_class_weight('balanced', classes=np.unique(all_train_labels), y=all_train_labels)
     class_weights_tensor = torch.tensor(class_weights, dtype=torch.float32).to(device)
-    print("Computed Class Weights:")
-    print(", ".join(f"{label_encoder.classes_[i]}: {w:.4f}"  for i, w in enumerate(class_weights)))
 
-    # 创建数据加载器
-    train_dataset = CachedDataset(train_data_cached);val_dataset = CachedDataset(val_data_cached);test_dataset = CachedDataset(test_data_cached)
-    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True,num_workers=4, pin_memory=True, persistent_workers=True)
-    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False,num_workers=4, pin_memory=True, persistent_workers=True)
-    test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False,num_workers=4, pin_memory=True, persistent_workers=True)
+    print("Computed Class Weights:")
+    try:
+        print(", ".join(f"{label_encoder.classes_[i]}: {w:.4f}" for i, w in enumerate(class_weights)))
+    except Exception:
+
+        print(", ".join(f"Class {i}: {w:.4f}" for i, w in enumerate(class_weights)))
+
+    def create_cached_dataset(x_np, y_np):
+        x_tensor = torch.from_numpy(x_np).float()
+        y_tensor = torch.from_numpy(y_np).long()
+        return [(x_tensor[i], y_tensor[i]) for i in range(len(x_tensor))]
+
+    print("Pre-loading and caching training data into memory...")
+    train_data_cached = create_cached_dataset(x_train_np, y_train_np)
+    print("Training data cache created.")
+
+    print("Caching validation data...")
+    val_data_cached = create_cached_dataset(x_val_np, y_val_np)
+    print("Validation data cache created.")
+
+    print("Caching test data...")
+    test_data_cached = create_cached_dataset(x_test_np, y_test_np)
+    print("Test data cache created.")
+
+    # 使用你原来的CachedDataset类，它工作得很好
+    train_dataset = CachedDataset(train_data_cached)
+    val_dataset = CachedDataset(val_data_cached)
+    test_dataset = CachedDataset(test_data_cached)
+
+    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=4, pin_memory=True,persistent_workers=True)
+    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=4, pin_memory=True,persistent_workers=True)
+    test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=4, pin_memory=True,persistent_workers=True)
 
     # 初始化模型、损失函数和优化器
     output_dim = len(label_encoder.classes_)  #16
