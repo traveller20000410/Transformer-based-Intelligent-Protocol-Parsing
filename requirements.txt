@@ -1,4 +1,5 @@
 #!pip install -r requirements.txt
 pytorch-crf
+xformers==0.0.29.post2
 #flash-attn
-triton==3.1.0
+triton==3.2.0
