@@ -1,2 +1,4 @@
 #!pip install -r requirements.txt
 pytorch-crf
+#flash-attn
+triton==3.1.0

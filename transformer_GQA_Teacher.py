@@ -4,16 +4,17 @@ import numpy as np;     from torch.profiler import profile, ProfilerActivity, sc
 import time;      import math;                                  from transformer_component import weighted_cross_entropy_loss,check_pth_is_accessible,export_to_onnx,loss_result_plt,preprocess_data
 from joblib import load;                                        from torch.utils.checkpoint import checkpoint
 from sklearn.metrics import classification_report;              from sklearn.utils.class_weight import compute_class_weight # 导入一个方便的工具
-from torch.cuda.amp import autocast, GradScaler;                from flash_attn import flash_attn_func
+from torch.cuda.amp import autocast, GradScaler;                import xformers.ops as xops
+from xformers.ops.fmha import attn_bias
 from torch.optim.lr_scheduler import StepLR, MultiStepLR, ReduceLROnPlateau, CosineAnnealingLR
 
 # 定义超参数，包括批量大小、训练轮次、学习率等
-BATCH_SIZE =        128;                        EPOCHS =        500
-LEARNING_RATE =     0.0001;                     D_MODEL =       128
-NUM_HEADS =         8;                          NUM_LAYERS =    6
+BATCH_SIZE =        32;                         EPOCHS =        500
+LEARNING_RATE =     0.0001;                     D_MODEL =       32
+NUM_HEADS =         4;                          NUM_LAYERS =    4
 DROPOUT =           0.1;                        MAX_LENGTH =    1250
 NUM_GROUPS =        2 ;                         PATIENCE=       20;
-INITIAL_ALPHA =     1.0;                        FINAL_ALPHA = 0.2
+INITIAL_ALPHA =     1.0;                        FINAL_ALPHA =   0.2
 ALPHA_DECAY_EPOCHS = EPOCHS * 0.7               #SCHEDULER_PATIENCE=15;
 
 #缓存数据类
@@ -54,14 +55,18 @@ def apply_rotary_pos_emb(q, k, cos, sin):
                        k1 * sin + k2 * cos], dim=-1)
     return q_rot, k_rot
 
+
+# 这是最终的、正确的GroupedQueryAttention类
+
 class GroupedQueryAttention(nn.Module):
-    def __init__(self, d_model, num_heads, num_groups, max_position_embeddings=MAX_LENGTH):
+    def __init__(self, d_model, num_heads, num_groups, dropout=DROPOUT,
+                 max_position_embeddings=MAX_LENGTH):
         super().__init__()
         self.d_model = d_model
         self.num_heads = num_heads
         self.num_groups = num_groups
         self.head_dim = d_model // num_heads
-        assert num_heads % num_groups == 0
+        assert num_heads % num_groups == 0, "num_heads must be divisible by num_groups"
         kv_dim = num_groups * self.head_dim
 
         self.W_q = nn.Linear(d_model, d_model)
@@ -69,36 +74,43 @@ class GroupedQueryAttention(nn.Module):
         self.W_v = nn.Linear(d_model, kv_dim)
         self.W_o = nn.Linear(d_model, d_model)
 
-        self.register_buffer('scale', torch.sqrt(torch.tensor(self.head_dim, dtype=torch.float32)))
         self.rotary_emb = RotaryEmbedding(self.head_dim, max_position_embeddings)
+        self.attn_dropout = dropout
 
-    def forward(self, query, key, value, mask=None):
+    def forward(self, query, key, value, mask=None):  # mask参数现在实际上没用了，但保留以兼容接口
         B, L, _ = query.size()
-        # 1. 线性 + reshape
-        q = self.W_q(query).view(B, L, self.num_heads, self.head_dim).transpose(1,2)
-        k = self.W_k(key)  .view(B, L, self.num_groups, self.head_dim).transpose(1,2)
-        v = self.W_v(value).view(B, L, self.num_groups, self.head_dim).transpose(1,2)
-        k = k.repeat_interleave(self.num_heads // self.num_groups, dim=1)
-        v = v.repeat_interleave(self.num_heads // self.num_groups, dim=1)
-        # 2. RoPE 位置编码
-        cos, sin = self.rotary_emb(L)         # [1,1,L, head_dim/2]
+
+        # 1. 独立投影 Q, K, V
+        q = self.W_q(query).view(B, L, self.num_heads, self.head_dim)
+        k = self.W_k(key).view(B, L, self.num_groups, self.head_dim)
+        v = self.W_v(value).view(B, L, self.num_groups, self.head_dim)
+
+        # 2. GQA的核心：为K和V复制头数
+        k = k.repeat_interleave(self.num_heads // self.num_groups, dim=2)
+        v = v.repeat_interleave(self.num_heads // self.num_groups, dim=2)
+
+        # 3. 应用旋转位置编码 (RoPE)
+        q = q.transpose(1, 2)
+        k = k.transpose(1, 2)
+        cos, sin = self.rotary_emb(L)
         q, k = apply_rotary_pos_emb(q, k, cos, sin)
-        # 3. mask → attn_bias
-        if mask is not None:
-            mask_bias = (~mask).view(B,1,1,L).to(q.dtype) * -1e4
-            attn_bias = mask_bias.repeat(1, self.num_heads, L, 1)
-        else:
-            attn_bias = None
-        # 4. 调用 FlashAttention（不再传 pos_bias）
-        out = flash_attn_func(
+        q = q.transpose(1, 2)
+        k = k.transpose(1, 2)
+
+        # v也需要调整形状以匹配xformers的输入
+        v = v.reshape(B, L, self.num_heads, self.head_dim)
+
+        # 4. **核心修复**: 对于无padding的定长序列，我们不需要attn_bias
+        # 直接调用xformers，它会执行全局注意力
+
+        out = xops.memory_efficient_attention(
             q, k, v,
-            dropout_p=0.0,
-            softmax_scale=None,
-            causal=False,
-            window_size=(-1, -1)  # (-1,-1) 表示不限制窗口，即 global attention
+            p=self.attn_dropout if self.training else 0.0,
+            attn_bias=None,  # <--- 明确地传入None
         )
-        # 5. reshape + 输出投影
-        out = out.transpose(1,2).reshape(B, L, self.d_model)
+
+        # 5. reshape和输出投影
+        out = out.reshape(B, L, self.d_model)
         return self.W_o(out)
 
 
@@ -117,26 +129,26 @@ class FeedForward(nn.Module):
             x = self.linear2(x)
             return x
 
-# Transformer 编码器层类
 class TransformerEncoderLayer(nn.Module):
     def __init__(self, d_model, num_heads, dropout, num_groups):
         super(TransformerEncoderLayer, self).__init__()
-        self.attention = GroupedQueryAttention(d_model, num_heads, num_groups)
-        self.ffn = FeedForward(d_model)
-        self.norm1 = nn.LayerNorm(d_model);     self.norm2 = nn.LayerNorm(d_model)
-        self.dropout_attn = nn.Dropout(dropout)
+        # 将dropout率传递给Attention层
+        self.attention = GroupedQueryAttention(d_model, num_heads, num_groups, dropout=dropout)
+        self.ffn = FeedForward(d_model, dropout=dropout)
+        self.norm1 = nn.LayerNorm(d_model)
+        self.norm2 = nn.LayerNorm(d_model)
 
     def forward(self, x, mask=None):
         def custom_forward(x):
-            # 先归一化，再进Attention
             norm_x = self.norm1(x)
             attn_output = self.attention(norm_x, norm_x, norm_x, mask)
-            x = x + self.dropout_attn(attn_output)
+            # MODIFIED: 直接进行残差连接, 因为dropout已在attention内部处理
+            x = x + attn_output
+
             norm_x2 = self.norm2(x)
             ffn_output = self.ffn(norm_x2)
             x = x + ffn_output
             return x
-
         x = checkpoint(custom_forward, x, use_reentrant=False)
         return x
 
