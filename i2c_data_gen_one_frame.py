@@ -396,7 +396,7 @@ class RealisticI2CSignalGenerator:
 
         return final_scl, final_sda, final_lbl, events
 
-    # --- MODIFIED: generate_i2c_datasets 现在返回events ---
+
     def generate_i2c_datasets(self, num_datasets=100, samples_per_dataset=10000):
         all_datasets_np = np.zeros((num_datasets, samples_per_dataset, 4), dtype=np.float32)
         all_labels_np = np.zeros((num_datasets, samples_per_dataset), dtype=np.int64)
@@ -414,10 +414,15 @@ class RealisticI2CSignalGenerator:
             final_waveform_4ch += np.random.normal(0, self.voltage_noise_std / 2, final_waveform_4ch.shape)
 
             current_len = len(scl_raw)
-            final_waveform_4ch[:current_len, scl_ch] = scl_raw
-            final_waveform_4ch[:current_len, sda_ch] = sda_raw
+            # 截断或填充原始波形
+            current_len = len(scl_raw)
+            L = min(current_len, samples_per_dataset)
+            final_waveform_4ch[:L, scl_ch] = scl_raw[:L]
+            final_waveform_4ch[:L, sda_ch] = sda_raw[:L]
+
+            # 标签同样截断
             final_labels = np.full(samples_per_dataset, LABEL_MAP['IDLE'], dtype=np.int64)
-            final_labels[:current_len] = labels_raw
+            final_labels[:L] = labels_raw[:L]
 
             all_datasets_np[i] = final_waveform_4ch
             all_labels_np[i] = final_labels
