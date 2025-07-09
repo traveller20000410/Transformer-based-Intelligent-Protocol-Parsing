@@ -11,18 +11,34 @@ LABEL_MAP = {
     "DATA_BIT_0": 12, "DATA_BIT_1": 13, "ACK": 14, "NACK": 15,
 }
 
+# I2C常见信号速率
+# 标准模式（Standard Mode）‌：速率约为100kbps（100kbit / s）‌12。
+# 快速模式（FastMode）‌：速率约为400kbps（400kbit / s）‌
+# 快速 + 模式（Fast - PlusMode）‌：速率约为1Mbps（1Mbit / s）‌
+# 高速模式（High - SpeedMode）‌：速率约为3.4Mbps（3.4Mbit / s）‌
+# 超高速模式（Ultra - FastMode）‌：速率约为5Mbps（5Mbit / s，单向传输）‌
+
 # 默认配置 (无变化)
 DEFAULT_I2C_CONFIG = {
-    'sampling_rate': 8e6, 'scl_freq': 1e5,
     'voltage_high': 3.3, 'voltage_low': 0.0,
-    'voltage_noise_std': 0.03,
-    'jitter_std_factor': 0.02,
+    'voltage_noise_std': 0.03, 'jitter_std_factor': 0.02,
     'rise_time_factor': 0.05, 'fall_time_factor': 0.05,
     'prob_write': 0.4, 'prob_read': 0.4, 'prob_write_read': 0.2,
     'prob_10bit_addr': 0.2, 'prob_addr_nack': 0.1, 'prob_data_nack': 0.1,
     'length_jitter_prob': 0.05, 'length_jitter_range': 0.1,
-    'idle_bits_min': 1, 'idle_bits_max': 10,
+    'idle_bits_min': 1, 'idle_bits_max': 10,'swap_channels_prob': 0.5,
     'max_write_bytes': 9, 'max_read_bytes': 9,
+    'scl_freq_options': {
+        100e3: 0.4,  # 标准模式 100kbps，40%概率
+        400e3: 0.2,  # 快速模式 400kbps，30%概率
+        1e6: 0.1,  # 快速+模式 1Mbps，15%概率
+        3.4e6: 0.2,  # 高速模式 3.4Mbps，10%概率
+        5e6: 0.1,  # 超高速模式 5Mbps，5%概率
+    },
+    # 添加可用的采样率选项
+    'sampling_rate_options': [
+        # 10e3, 20e3, 50e3, 100e3, 200e3, 500e3,1e6,
+        2e6, 5e6, 10e6, 20e6, 50e6,100e6, 200e6, 500e6, 1e9]
 }
 
 
@@ -36,9 +52,6 @@ def get_label_name(label_id):
 class RealisticI2CSignalGenerator:
     def __init__(self, config):
         self.config = config
-        self.sampling_rate = config['sampling_rate']
-        self.scl_freq = config['scl_freq']
-        self.base_samples_per_bit = int(self.sampling_rate / self.scl_freq)
         self.idle_bits_min = config.get('idle_bits_min', 1)
         self.idle_bits_max = config.get('idle_bits_max', 10)
         self.voltage_high = config['voltage_high']
@@ -50,7 +63,30 @@ class RealisticI2CSignalGenerator:
         self.length_jitter_prob = config.get('length_jitter_prob', 0.1)
         self.length_jitter_range = config.get('length_jitter_range', 0.1)
 
-    # _get_samples_per_bit, add_noise, add_transition_time, _generate_bit 保持不变
+        self.sampling_rate = None
+        self.scl_freq = None
+        self.base_samples_per_bit = None
+
+    def _select_frequencies(self):
+        scl_options = list(self.config['scl_freq_options'].keys())
+        scl_probs = list(self.config['scl_freq_options'].values())
+        self.scl_freq = np.random.choice(scl_options, p=scl_probs)
+        # 选择满足条件的最小采样率（采样率/SCL频率 > 50）
+        min_rate = 50 * self.scl_freq
+        valid_rates = [r for r in self.config['sampling_rate_options'] if r >= min_rate]
+        if not valid_rates:
+            # 如果没有满足条件的采样率，则选择可用的最大采样率
+            self.sampling_rate = max(self.config['sampling_rate_options'])
+            print(f"Warning: No valid sampling rate for SCL={self.scl_freq / 1e3:.1f}kHz. "
+                  f"Using max available: {self.sampling_rate / 1e6:.1f}MHz")
+        else:
+            # 选择最小的满足条件的采样率（减少数据量）
+            self.sampling_rate = min(valid_rates)
+        # 更新每个bit的基础样本数
+        self.base_samples_per_bit = int(self.sampling_rate / self.scl_freq)
+        return self.scl_freq, self.sampling_rate
+
+
     def _get_samples_per_bit(self):
         n = self.base_samples_per_bit
         if np.random.rand() < self.length_jitter_prob:
@@ -151,6 +187,8 @@ class RealisticI2CSignalGenerator:
 
     # --- MODIFIED: generate_i2c_transaction 现在是总指挥 ---
     def generate_i2c_transaction(self):
+        scl, sr = self._select_frequencies()
+        print(f"Selected SCL={scl/1e3:.1f}kHz, sampling_rate={sr/1e6:.1f}MHz,base_samples_per_bit={sr/scl:.1f}")
         scl_seq, sda_seq, lbl_seq, events = [], [], [], []
 
         op_rand = np.random.rand()
@@ -360,31 +398,32 @@ class RealisticI2CSignalGenerator:
 
     # --- MODIFIED: generate_i2c_datasets 现在返回events ---
     def generate_i2c_datasets(self, num_datasets=100, samples_per_dataset=10000):
-        all_datasets, all_labels, all_events = [], [], []
-        for _ in range(num_datasets):
-            s, d, l, ev = self.generate_i2c_transaction()
-            current_len = len(s)
-            if current_len > samples_per_dataset:
-                print(f"Warning: A single I2C transaction ({current_len} samples) "
-                      f"exceeded the target length ({samples_per_dataset}). Truncating.")
-                s = s[:samples_per_dataset];
-                d = d[:samples_per_dataset];
-                l = l[:samples_per_dataset]
-                # Note: Truncating might make the event list inconsistent.
-            else:
-                padding_len = samples_per_dataset - current_len
-                s_pad = np.full(padding_len, self.voltage_high)
-                d_pad = np.full(padding_len, self.voltage_high)
-                l_pad = np.full(padding_len, LABEL_MAP['IDLE'])
-                s = np.concatenate([s, s_pad]);
-                d = np.concatenate([d, d_pad]);
-                l = np.concatenate([l, l_pad])
+        all_datasets_np = np.zeros((num_datasets, samples_per_dataset, 4), dtype=np.float32)
+        all_labels_np = np.zeros((num_datasets, samples_per_dataset), dtype=np.int64)
+        all_events = []  # events 仍然是Python列表
+        all_channel_maps = []  #保存每个样本的 SCL/SDA 通道映射
 
-            all_datasets.append(np.stack([s, d], axis=-1))
-            all_labels.append(l)
-            all_events.append(ev)
+        for i in range(num_datasets):
+            scl_raw, sda_raw, labels_raw, events_raw = self.generate_i2c_transaction()
+            # 随机映射到 4 通道
+            ch_indices = np.random.choice(4, 2, replace=False)
+            scl_ch, sda_ch = int(ch_indices[0]), int(ch_indices[1])
+            all_channel_maps.append((scl_ch, sda_ch))
+            # 构建 4 通道波形，并添加微小噪声
+            final_waveform_4ch = np.full((samples_per_dataset, 4),self.voltage_high, dtype=np.float32)
+            final_waveform_4ch += np.random.normal(0, self.voltage_noise_std / 2, final_waveform_4ch.shape)
 
-        return np.array(all_datasets), all_labels, all_events
+            current_len = len(scl_raw)
+            final_waveform_4ch[:current_len, scl_ch] = scl_raw
+            final_waveform_4ch[:current_len, sda_ch] = sda_raw
+            final_labels = np.full(samples_per_dataset, LABEL_MAP['IDLE'], dtype=np.int64)
+            final_labels[:current_len] = labels_raw
+
+            all_datasets_np[i] = final_waveform_4ch
+            all_labels_np[i] = final_labels
+            all_events.append(events_raw)
+
+        return all_datasets_np, all_labels_np, all_events, all_channel_maps
 
     # --- NEW: 完全重写的 save_dataset 函数 ---
     def save_dataset(self, scl, sda, labels, events, base_dir, prefix="i2c"):
@@ -471,17 +510,18 @@ if __name__ == '__main__':
     gen = RealisticI2CSignalGenerator(config=DEFAULT_I2C_CONFIG)
     print("Generating dataset...")
     # generate_i2c_datasets 现在返回3个值
-    all_data, all_labels, all_events = gen.generate_i2c_datasets(num_datasets=5, samples_per_dataset=10000)
+    all_data, all_labels, all_events, all_maps = gen.generate_i2c_datasets(num_datasets=20, samples_per_dataset=10000)
 
     # 循环保存每个生成的数据集
     for i in range(len(all_data)):
         data_sample = all_data[i]
         label_sample = all_labels[i]
         event_sample = all_events[i]
+        scl_ch, sda_ch = all_maps[i]
 
         # 从堆叠的数组中分离出SCL和SDA，以便保存
-        scl = data_sample[:, 0]
-        sda = data_sample[:, 1]
+        scl = data_sample[:, scl_ch]
+        sda = data_sample[:, sda_ch]
 
         # 调用保存函数
         gen.save_dataset(scl, sda, label_sample, event_sample, base_dir=output_dir, prefix="i2c")

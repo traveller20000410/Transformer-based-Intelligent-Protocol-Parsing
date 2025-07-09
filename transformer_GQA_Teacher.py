@@ -98,9 +98,7 @@ class GroupedQueryAttention(nn.Module):
         # v也需要调整形状以匹配xformers的输入
         v = v.reshape(B, L, self.num_heads, self.head_dim)
 
-        # 4. **核心修复**: 对于无padding的定长序列，我们不需要attn_bias
-        # 直接调用xformers，它会执行全局注意力
-
+        # 4. **核心修复**: 对于无padding的定长序列，我们不需要attn_bias    # 直接调用xformers，它会执行全局注意力
         out = xops.memory_efficient_attention(
             q, k, v,
             p=self.attn_dropout if self.training else 0.0,

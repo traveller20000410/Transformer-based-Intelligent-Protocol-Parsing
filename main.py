@@ -1,26 +1,22 @@
-#import I2C_data_generator_mutliframe;
-import i2c_data_gen_one_frame as I2C_data_generator;
-import torch;   import os;
-#import common8b10b_data_generator;                              #import matplotlib.pyplot as plt
-#import RS232_data_generator;
-from scipy import stats
-# from transformer_MLA import train_model as MLA_train_model,predict_protocol,load_model
+import i2c_data_gen_one_frame as I2C_data_generator;            #import I2C_data_generator_mutliframe;
+import torch;   import os;                                      #import RS232_data_generator;
+#import common8b10b_data_generator;                             #import matplotlib.pyplot as plt
+from scipy import stats                                         # from transformer_MLA import train_model as MLA_train_model,predict_protocol,load_model
 from transformer_GQA_Teacher import train_model as GQA_train_model,predict_protocol,load_model
 # from transformer_GQA_Student import trained_student_model
 import numpy as np;                                             from universal_function import save_downsampled_csv
-import pandas as pd
-from joblib import load
+import pandas as pd;                                            from scipy import stats
+from joblib import load;                                        from scipy.signal import resample
 
 #定义
 RESUME_TRAINING = False
 DATA_CACHE_PATH = "cached_data.npz"
 
-
 #生成协议数据
 def generate_protocols_dataset(num_datasets=None):
     # #生成I2C协议数据与标签
     gen = I2C_data_generator.RealisticI2CSignalGenerator(config=I2C_data_generator.DEFAULT_I2C_CONFIG)
-    protocols_dataset0, protocol_labels0,_ = gen.generate_i2c_datasets(num_datasets)
+    protocols_dataset0, protocol_labels0,_,channel_maps = gen.generate_i2c_datasets(num_datasets)
     #生成RS232协议数据与标签
     # gen = RS232_data_generator.RealisticRS232SignalGenerator()
     # protocols_dataset1, protocol_labels1 = gen.generate_rs232_datasets(num_datasets)
@@ -45,7 +41,7 @@ def generate_protocols_dataset(num_datasets=None):
     #     shuffled_protocol_labels[i] = protocol_labels[indices[i]]
 
     # return shuffled_protocols_dataset, shuffled_protocol_labels
-    return protocols_dataset0, protocol_labels0
+    return protocols_dataset0, protocol_labels0,channel_maps
 
 
 def train_transformer_model(num_datasets=None):
@@ -57,40 +53,104 @@ def train_transformer_model(num_datasets=None):
     else:
         print("[main.py] 重新生成并处理数据...")
         # 生成协议数据与标签
-        protocols_dataset, protocol_labels = generate_protocols_dataset(num_datasets)
+        protocols_dataset, protocol_labels,channel_maps = generate_protocols_dataset(num_datasets)
         print(f"[main.py] Shape after generation: {protocols_dataset.shape}")  # 应该输出 [64, 10000, 2]
         #预处理
         processed_dataset,processed_labels=preprocess_dataset(protocols_dataset, protocol_labels)
-        print(f"[main.py] Shape after downsampling: {processed_dataset.shape}")  # 应该输出 [64, 1000, 2]
+        print(f"[main.py] Shape after downsampling: {processed_dataset.shape}")  # 应该输出 [64, 1250, 2]
         np.savez(DATA_CACHE_PATH, data=processed_dataset, labels=processed_labels)
+
+        # 3) 导出下采样后的 SCL/SDA
+        export_scl_sda_from_4ch(data_4ch=processed_dataset,labels=processed_labels,maps=channel_maps,base_dir="downsampled_scl_sda",
+            sampling_rate=processed_dataset.shape[1])
+
     #启动训练
     # MLA_train_model(processed_dataset, processed_labels)
     GQA_train_model(processed_dataset, processed_labels)
 
 
+# def export_downsampled_waveforms(down_data, down_labels, base_dir="downsampled_i2c", sampling_rate=None):
+#
+#     os.makedirs(base_dir, exist_ok=True)
+#     num_ds, L, _ = down_data.shape
+#     # 如果你想用通用函数直接保存
+#     try:
+#         for i in range(num_ds):
+#             # save_downsampled_csv 会把 (L,2) 的数据写成 CSV
+#             save_downsampled_csv(
+#                 down_data[i],                         # 波形 (SCL/SDA)
+#                 down_labels[i],                       # 对应标签
+#                 os.path.join(base_dir, f"ds_{i:03d}.csv"),
+#                 fs=sampling_rate                     # 可选：传给它采样率
+#             )
+#         print(">>> downsampled CSVs saved via save_downsampled_csv()")
+#         return
+#     except NameError:
+#         # 如果没有这个函数，再走下面的 pandas 路径
+#         pass
+#     # pandas 版本
+#     for i in range(num_ds):
+#         df = pd.DataFrame({
+#             'Time_us': np.arange(L) / sampling_rate * 1e6 if sampling_rate else np.arange(L),
+#             'SCL':      down_data[i, :, 0],
+#             'SDA':      down_data[i, :, 1],
+#             'Label':    down_labels[i]
+#         })
+#         path = os.path.join(base_dir, f"down_i2c_{i:03d}.csv")
+#         df.to_csv(path, index=False)
+#     print(f">>> downsampled CSVs saved under {base_dir}/")
+
+def export_scl_sda_from_4ch(data_4ch: np.ndarray, labels: np.ndarray, maps: list[tuple[int,int]],  base_dir: str = "scl_sda_export",sampling_rate: float = None):
+    os.makedirs(base_dir, exist_ok=True)
+    N, L, C = data_4ch.shape
+    assert C == 4, "输入必须是 4 通道"
+    for i, (scl_ch, sda_ch) in enumerate(maps):
+        scl = data_4ch[i, :, scl_ch]
+        sda = data_4ch[i, :, sda_ch]
+        lab = labels[i]
+        # 可选地，生成 时间 列
+        if sampling_rate:
+            time_us = np.arange(L) / sampling_rate * 1e6
+            df = pd.DataFrame({
+                "Time_us": time_us,
+                "SCL":      scl,
+                "SDA":      sda,
+                "Label":    lab,
+            })
+        else:
+            df = pd.DataFrame({
+                "SCL":   scl,
+                "SDA":   sda,
+                "Label": lab,
+            })
+        path = os.path.join(base_dir, f"ds_{i:03d}.csv")
+        df.to_csv(path, index=False)
+    print(f">>> 已导出 {N} 条仅含 SCL/SDA 的 CSV 到：{base_dir}/")
+
+
 def preprocess_dataset(dataset, labels, target_length=1250):
     original_data = np.array(dataset, dtype=np.float32)
     original_labels = np.array(labels, dtype=np.int64)
-
-    original_length = original_data.shape[1]
-    if original_length <= target_length:
-        return original_data, original_labels
-
     num_datasets = original_data.shape[0]
-    factor = original_length // target_length
+    original_length = original_data.shape[1]
 
-    downsampled_labels = np.zeros((num_datasets, target_length), dtype=np.int64)
+    if original_length <= target_length:
+        print(f"Warning: Original length {original_length} is <= target {target_length}. Skipping resampling.")
+        return original_data, original_labels
+    resampled_data = resample(original_data, target_length, axis=1)
 
+    resampled_labels = np.zeros((num_datasets, target_length), dtype=np.int64)
+    ratio = original_length / target_length
     for i in range(num_datasets):
         for j in range(target_length):
-            start = j * factor
-            end = start + factor
+            start = int(j * ratio)
+            end = int((j + 1) * ratio)
             label_window = original_labels[i, start:end]
-            mode_result = stats.mode(label_window, keepdims=False)
-            downsampled_labels[i, j] = mode_result.mode
+            # 使用stats.mode找到窗口中最常见的标签
+            mode_result = stats.mode(label_window, keepdims=True)
+            resampled_labels[i, j] = mode_result.mode[0]
 
-    # 注意：返回的是原始数据和降采样后的标签
-    return original_data, downsampled_labels
+    return resampled_data.astype(np.float32), resampled_labels
 
 # def generate_test_protocols_dataset(num_datasets=None):
 #     # 生成测试数据以预测标签
@@ -196,7 +256,7 @@ def test_with_sequence(model, label_encoder, sequence_length=1024):
 #     plt.show()
 
 def main():
-    train_transformer_model(num_datasets=600)
+    train_transformer_model(num_datasets=70)
     # test_model(flag="te",num_datasets=None)
 
 if __name__ == "__main__":
