@@ -56,8 +56,6 @@ def apply_rotary_pos_emb(q, k, cos, sin):
     return q_rot, k_rot
 
 
-# 这是最终的、正确的GroupedQueryAttention类
-
 class GroupedQueryAttention(nn.Module):
     def __init__(self, d_model, num_heads, num_groups, dropout=DROPOUT,
                  max_position_embeddings=MAX_LENGTH):
@@ -165,35 +163,18 @@ class TransformerModel(nn.Module):
     def __init__(self, output_dim, max_length, d_model, num_heads, num_layers, dropout, num_groups):
         super(TransformerModel, self).__init__()
 
-        # CNN Frontend
-        self.cnn_frontend = nn.Sequential(
-            # 输入: [B, 2, 10000]
-            nn.Conv1d(in_channels=2, out_channels=d_model // 2, kernel_size=7, stride=2, padding=3),
-            nn.BatchNorm1d(d_model // 2),  # BatchNorm有助于CNN稳定训练
-            nn.GELU(),
-            # 输出: [B, d_model/2, 5000]
-            nn.Conv1d(in_channels=d_model // 2, out_channels=d_model, kernel_size=5, stride=2, padding=2),
-            nn.BatchNorm1d(d_model),
-            nn.GELU(),
-            # 输出: [B, d_model, 2500]
-            nn.Conv1d(in_channels=d_model, out_channels=d_model, kernel_size=3, stride=2, padding=1),
-            nn.BatchNorm1d(d_model),
-            nn.GELU()   # 最终输出: [B, d_model, 1250]
-        )
-
+        self.input_projection = nn.Linear(4, d_model)
         self.encoder = TransformerEncoder(num_layers, d_model, num_heads, dropout, num_groups)
         self.fc = nn.Linear(d_model, output_dim)
         self.crf = torchcrf.CRF(output_dim, batch_first=True)  # 添加 CRF 层
 
     def forward(self, x):
-        x_cnn_in = x.permute(0, 2, 1)
-        x_features = self.cnn_frontend(x_cnn_in)  # Shape: [B, d_model, 1250]
-        # print(">>> after cnn_frontend:", x_features.shape)
 
-        x_transformer_in = x_features.permute(0, 2, 1)  # Shape: [B, 1250, d_model]
-        mask = torch.ones(x_transformer_in.shape[0], x_transformer_in.shape[1], dtype=torch.bool, device=x.device)
-        encoded_output = self.encoder(x_transformer_in, mask=mask)
+        x_features = self.input_projection(x)
+        mask = torch.ones(x_features.shape[0], x_features.shape[1], dtype=torch.bool, device=x.device)
+        encoded_output = self.encoder(x_features, mask=mask)
         emissions = self.fc(encoded_output)
+
         return emissions, mask
 
 # 训练函数，包括前向传播、计算损失、反向传播和参数更新
