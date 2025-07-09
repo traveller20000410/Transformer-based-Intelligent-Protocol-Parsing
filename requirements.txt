@@ -2,4 +2,4 @@
 pytorch-crf
 xformers==0.0.29.post2
 #flash-attn
-triton==3.2.0
+#triton==3.2.0
