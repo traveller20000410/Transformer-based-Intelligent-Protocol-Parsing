@@ -306,6 +306,18 @@ def train_model(protocols_dataset, protocol_labels):
     gc.collect()
     print("Tensors created and NumPy memory released.")
 
+    print("Pinning tensors into page-locked memory for high-speed transfer...")
+    if torch.cuda.is_available():
+        x_train_tensor = x_train_tensor.pin_memory()
+        y_train_tensor = y_train_tensor.pin_memory()
+        x_val_tensor = x_val_tensor.pin_memory()
+        y_val_tensor = y_val_tensor.pin_memory()
+        x_test_tensor = x_test_tensor.pin_memory()
+        y_test_tensor = y_test_tensor.pin_memory()
+        print("Tensors successfully pinned.")
+    else:
+        print("CUDA not available, skipping pin_memory().")
+
     # 3. 使用新的高效Dataset类来创建数据集实例
     train_dataset = ProtocolTensorDataset(x_train_tensor, y_train_tensor)
     val_dataset = ProtocolTensorDataset(x_val_tensor, y_val_tensor)
