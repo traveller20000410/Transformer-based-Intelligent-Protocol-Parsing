@@ -9,7 +9,7 @@ from xformers.ops.fmha import attn_bias
 from torch.optim.lr_scheduler import StepLR, MultiStepLR, ReduceLROnPlateau, CosineAnnealingLR
 
 # 定义超参数，包括批量大小、训练轮次、学习率等
-BATCH_SIZE =        128;                         EPOCHS =        500
+BATCH_SIZE =        128;                        EPOCHS =        500
 LEARNING_RATE =     0.0001;                     D_MODEL =       128
 NUM_HEADS =         8;                          NUM_LAYERS =    8
 DROPOUT =           0.1;                        MAX_LENGTH =    1250
@@ -18,15 +18,17 @@ INITIAL_ALPHA =     1.0;                        FINAL_ALPHA =   0.2
 ALPHA_DECAY_EPOCHS = EPOCHS * 0.7               #SCHEDULER_PATIENCE=15;
 
 #缓存数据类
-class CachedDataset(Dataset):
-    def __init__(self, cached_data):
-        self.cached_data = cached_data
+class ProtocolTensorDataset(Dataset):
+    def __init__(self, data_tensor, labels_tensor):
+        assert data_tensor.size(0) == labels_tensor.size(0)
+        self.data_tensor = data_tensor
+        self.labels_tensor = labels_tensor
+
+    def __getitem__(self, index):
+        return self.data_tensor[index], self.labels_tensor[index]
 
     def __len__(self):
-        return len(self.cached_data)
-
-    def __getitem__(self, idx):
-        return self.cached_data[idx]
+        return self.data_tensor.size(0)
 
 class RotaryEmbedding(nn.Module):
     def __init__(self, dim, max_position_embeddings=MAX_LENGTH):
@@ -287,38 +289,36 @@ def train_model(protocols_dataset, protocol_labels):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     class_weights_tensor = torch.tensor(class_weights, dtype=torch.float32).to(device)
 
-    print("Computed Class Weights:")
-    try:
-        print(", ".join(f"{label_encoder.classes_[i]}: {w:.4f}" for i, w in enumerate(class_weights)))
-    except Exception:
+    print("Converting NumPy arrays to PyTorch Tensors...")
+    # 1. 一次性将所有分割好的数据转换为PyTorch张量
+    x_train_tensor = torch.from_numpy(x_train_np).float()
+    y_train_tensor = torch.from_numpy(y_train_np).long()
 
-        print(", ".join(f"Class {i}: {w:.4f}" for i, w in enumerate(class_weights)))
+    x_val_tensor = torch.from_numpy(x_val_np).float()
+    y_val_tensor = torch.from_numpy(y_val_np).long()
 
-    def create_cached_dataset(x_np, y_np):
-        x_tensor = torch.from_numpy(x_np).float()
-        y_tensor = torch.from_numpy(y_np).long()
-        return [(x_tensor[i], y_tensor[i]) for i in range(len(x_tensor))]
+    x_test_tensor = torch.from_numpy(x_test_np).float()
+    y_test_tensor = torch.from_numpy(y_test_np).long()
 
-    print("Pre-loading and caching training data into memory...")
-    train_data_cached = create_cached_dataset(x_train_np, y_train_np)
-    print("Training data cache created.")
+    # 2. 释放不再需要的NumPy数组内存，以防万一
+    del x_train_np, y_train_np, x_val_np, y_val_np, x_test_np, y_test_np
+    import gc
+    gc.collect()
+    print("Tensors created and NumPy memory released.")
 
-    print("Caching validation data...")
-    val_data_cached = create_cached_dataset(x_val_np, y_val_np)
-    print("Validation data cache created.")
+    # 3. 使用新的高效Dataset类来创建数据集实例
+    train_dataset = ProtocolTensorDataset(x_train_tensor, y_train_tensor)
+    val_dataset = ProtocolTensorDataset(x_val_tensor, y_val_tensor)
+    test_dataset = ProtocolTensorDataset(x_test_tensor, y_test_tensor)
+    print("High-performance TensorDatasets created.")
 
-    print("Caching test data...")
-    test_data_cached = create_cached_dataset(x_test_np, y_test_np)
-    print("Test data cache created.")
-
-    # 使用你原来的CachedDataset类，它工作得很好
-    train_dataset = CachedDataset(train_data_cached)
-    val_dataset = CachedDataset(val_data_cached)
-    test_dataset = CachedDataset(test_data_cached)
-
-    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=4, pin_memory=True,persistent_workers=True)
-    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=4, pin_memory=True,persistent_workers=True)
-    test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=4, pin_memory=True,persistent_workers=True)
+    # 4. DataLoader的定义保持不变，它现在包裹的是我们高效的Dataset
+    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=4, pin_memory=True,
+                              persistent_workers=True)
+    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=4, pin_memory=True,
+                            persistent_workers=True)
+    test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=4, pin_memory=True,
+                             persistent_workers=True)
 
     # 初始化模型、损失函数和优化器
     output_dim = len(label_encoder.classes_)  #16
