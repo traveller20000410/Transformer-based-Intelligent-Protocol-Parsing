@@ -129,28 +129,23 @@ def export_scl_sda_from_4ch(data_4ch: np.ndarray, labels: np.ndarray, maps: list
 
 
 def preprocess_dataset(dataset, labels, target_length=1250):
-    original_data = np.array(dataset, dtype=np.float32)
-    original_labels = np.array(labels, dtype=np.int64)
+    original_data = dataset
+    original_labels = labels
+
     num_datasets = original_data.shape[0]
     original_length = original_data.shape[1]
 
     if original_length <= target_length:
         print(f"Warning: Original length {original_length} is <= target {target_length}. Skipping resampling.")
-        return original_data, original_labels
+        return original_data.astype(np.float32), original_labels
+
     resampled_data = resample(original_data, target_length, axis=1)
+    factor = original_length // target_length
+    trimmed_labels = original_labels[:, :target_length * factor]
+    reshaped_labels = trimmed_labels.reshape(num_datasets, target_length, factor)
+    resampled_labels, _ = stats.mode(reshaped_labels, axis=2, keepdims=False)
 
-    resampled_labels = np.zeros((num_datasets, target_length), dtype=np.int64)
-    ratio = original_length / target_length
-    for i in range(num_datasets):
-        for j in range(target_length):
-            start = int(j * ratio)
-            end = int((j + 1) * ratio)
-            label_window = original_labels[i, start:end]
-            # 使用stats.mode找到窗口中最常见的标签
-            mode_result = stats.mode(label_window, keepdims=True)
-            resampled_labels[i, j] = mode_result.mode[0]
-
-    return resampled_data.astype(np.float32), resampled_labels
+    return resampled_data.astype(np.float32), resampled_labels.astype(np.int64)
 
 # def generate_test_protocols_dataset(num_datasets=None):
 #     # 生成测试数据以预测标签

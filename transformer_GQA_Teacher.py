@@ -179,8 +179,11 @@ class TransformerModel(nn.Module):
 def train(model, train_loader, optimizer, device,scaler,scheduler,weight_tensor=None, alpha=0.5, do_profiling=False):
     model.train()
     running_loss = 0.0
-    correct = 0
-    total = 0
+    #  使用GPU进行精度计算
+    total_correct_gpu = torch.tensor(0.0, device=device)
+    total_samples_gpu = torch.tensor(0.0, device=device)
+
+    #可选，性能检测
     if do_profiling:
         prof = profile(
             activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
@@ -208,26 +211,31 @@ def train(model, train_loader, optimizer, device,scaler,scheduler,weight_tensor=
             loss_ce = cross_entropy_func(active_emissions, active_targets)
             loss = loss_crf + alpha * loss_ce
 
-            scaler.scale(loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
+        scaler.scale(loss).backward()
+        scaler.step(optimizer)
+        scaler.update()
         #性能分析
         if do_profiling:
             prof.step()
 
         running_loss += loss.item()
-        predicted = model.crf.decode(emissions, mask)  # 使用 CRF 解码得到预测结果
-        predicted = [item for sublist in predicted for item in sublist]
-        target = target[mask].view(-1).tolist()
-        total += len(target)
-        correct += sum(p == t for p, t in zip(predicted, target))
+
+        with torch.no_grad():
+            predicted = model.crf.decode(emissions, mask=mask)
+            predicted_flat_cpu = [p for sublist in predicted for p in sublist]
+            if not predicted_flat_cpu:    continue
+            predicted_flat_gpu = torch.tensor(predicted_flat_cpu, device=device)
+            total_correct_gpu += (predicted_flat_gpu == active_targets).sum()
+            total_samples_gpu += active_targets.numel()
+
+    final_accuracy = (total_correct_gpu / total_samples_gpu).item() if total_samples_gpu > 0 else 0.0
 
     if do_profiling:
         prof.__exit__(None, None, None)
         # 输出 profiling 结果
         print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=10))
 
-    return running_loss / len(train_loader), correct / total
+    return running_loss / len(train_loader), final_accuracy
 
 
 def train_model(protocols_dataset, protocol_labels):
@@ -481,8 +489,10 @@ def train_model(protocols_dataset, protocol_labels):
 def test(model, test_loader, device, scaler, weight_tensor=None, alpha=0.5):
     model.eval()
     running_loss = 0.0
-    correct = 0
-    total = 0
+    # --- 初始化用于GPU计数的张量 ---
+    total_correct_gpu = torch.tensor(0.0, device=device)
+    total_samples_gpu = torch.tensor(0.0, device=device)
+
     with torch.no_grad():
         for batch_idx, (data, target) in enumerate(test_loader):
             data, target = data.to(device), target.to(device)
@@ -496,20 +506,25 @@ def test(model, test_loader, device, scaler, weight_tensor=None, alpha=0.5):
                 active_loss_mask = mask.view(-1) == 1
                 active_emissions = emissions_flat[active_loss_mask]
                 active_targets = target_flat[active_loss_mask]
+
                 cross_entropy_func = nn.CrossEntropyLoss(weight=weight_tensor)
                 loss_ce = cross_entropy_func(active_emissions, active_targets) if weight_tensor is not None else 0
                 loss = loss_crf + alpha * loss_ce if weight_tensor is not None else loss_crf
                 # --- 结束组合损失计算 ---
 
                 running_loss += loss.item()
-                # 使用 CRF 解码得到预测结果
+                #GPU精度计算
                 predicted = model.crf.decode(emissions, mask=mask)
-                # 准确率计算
-                predicted = [item for sublist in predicted for item in sublist]
-                target = target[mask].view(-1).tolist()
-                total += len(target)
-                correct += sum(p == t for p, t in zip(predicted, target))
-    return running_loss / len(test_loader), correct / total
+                predicted_flat_cpu = [p for sublist in predicted for p in sublist]
+                if not predicted_flat_cpu:  continue
+                predicted_flat_gpu = torch.tensor(predicted_flat_cpu, device=device)
+                # `active_targets` 已经存在于GPU上
+                total_correct_gpu += (predicted_flat_gpu == active_targets).sum()
+                total_samples_gpu += active_targets.numel()
+
+    final_accuracy = (total_correct_gpu / total_samples_gpu).item() if total_samples_gpu > 0 else 0.0
+
+    return running_loss / len(test_loader), final_accuracy
 
 def predict_protocol(model, data):
     device = next(model.parameters()).device

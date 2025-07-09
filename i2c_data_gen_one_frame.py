@@ -188,7 +188,7 @@ class RealisticI2CSignalGenerator:
     # --- MODIFIED: generate_i2c_transaction 现在是总指挥 ---
     def generate_i2c_transaction(self):
         scl, sr = self._select_frequencies()
-        print(f"Selected SCL={scl/1e3:.1f}kHz, sampling_rate={sr/1e6:.1f}MHz,base_samples_per_bit={sr/scl:.1f}")
+        #print(f"Selected SCL={scl/1e3:.1f}kHz, sampling_rate={sr/1e6:.1f}MHz,base_samples_per_bit={sr/scl:.1f}")
         scl_seq, sda_seq, lbl_seq, events = [], [], [], []
 
         op_rand = np.random.rand()
