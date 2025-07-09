@@ -334,10 +334,12 @@ def train_model(protocols_dataset, protocol_labels):
     # 初始化模型、损失函数和优化器
     output_dim = len(label_encoder.classes_)  #16
     model = TransformerModel(output_dim, MAX_LENGTH, D_MODEL, NUM_HEADS, NUM_LAYERS, DROPOUT,NUM_GROUPS)
+    model = torch.compile(model)
     # #多卡并行计算
     # if torch.cuda.device_count() > 1:
     #     print(f"Let's use {torch.cuda.device_count()} GPUs!")
     #     model = torch.nn.DataParallel(model)
+    model = model.to(device)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE,weight_decay=1e-5)
     scaler = torch.amp.GradScaler('cuda')
