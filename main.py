@@ -61,8 +61,7 @@ def train_transformer_model(num_datasets=None):
         np.savez(DATA_CACHE_PATH, data=processed_dataset, labels=processed_labels)
 
         # 3) 导出下采样后的 SCL/SDA
-        export_scl_sda_from_4ch(data_4ch=processed_dataset,labels=processed_labels,maps=channel_maps,base_dir="downsampled_scl_sda",
-            sampling_rate=processed_dataset.shape[1])
+        #export_scl_sda_from_4ch(data_4ch=processed_dataset,labels=processed_labels,maps=channel_maps,base_dir="downsampled_scl_sda",sampling_rate=processed_dataset.shape[1])
 
     #启动训练
     # MLA_train_model(processed_dataset, processed_labels)
