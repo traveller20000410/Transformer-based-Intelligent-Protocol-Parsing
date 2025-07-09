@@ -9,9 +9,9 @@ from xformers.ops.fmha import attn_bias
 from torch.optim.lr_scheduler import StepLR, MultiStepLR, ReduceLROnPlateau, CosineAnnealingLR
 
 # 定义超参数，包括批量大小、训练轮次、学习率等
-BATCH_SIZE =        32;                         EPOCHS =        500
-LEARNING_RATE =     0.0001;                     D_MODEL =       32
-NUM_HEADS =         4;                          NUM_LAYERS =    4
+BATCH_SIZE =        128;                         EPOCHS =        500
+LEARNING_RATE =     0.0001;                     D_MODEL =       128
+NUM_HEADS =         8;                          NUM_LAYERS =    8
 DROPOUT =           0.1;                        MAX_LENGTH =    1250
 NUM_GROUPS =        2 ;                         PATIENCE=       20;
 INITIAL_ALPHA =     1.0;                        FINAL_ALPHA =   0.2
