@@ -137,17 +137,16 @@ class TransformerEncoderLayer(nn.Module):
         self.norm2 = nn.LayerNorm(d_model)
 
     def forward(self, x, mask=None):
-        def custom_forward(x):
-            norm_x = self.norm1(x)
-            attn_output = self.attention(norm_x, norm_x, norm_x, mask)
-            # MODIFIED: 直接进行残差连接, 因为dropout已在attention内部处理
-            x = x + attn_output
+        norm_x = self.norm1(x)
+        attn_out = self.attention(norm_x, norm_x, norm_x, mask)
+        # 残差连接
+        x = x + attn_out
+        # 2. 归一化并计算前馈
+        norm_x2 = self.norm2(x)
+        ffn_out = self.ffn(norm_x2)
+        # 残差连接
+        x = x + ffn_out
 
-            norm_x2 = self.norm2(x)
-            ffn_output = self.ffn(norm_x2)
-            x = x + ffn_output
-            return x
-        x = checkpoint(custom_forward, x, use_reentrant=False)
         return x
 
 class TransformerEncoder(nn.Module):
