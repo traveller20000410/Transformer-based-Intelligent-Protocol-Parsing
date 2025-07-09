@@ -223,11 +223,10 @@ def train(model, train_loader, optimizer, device,scaler,scheduler,weight_tensor=
         running_loss += loss.item()
 
         with torch.no_grad():
-            predicted = model.crf.decode(emissions, mask=mask)
-            predicted_flat_cpu = [p for sublist in predicted for p in sublist]
-            if not predicted_flat_cpu:    continue
-            predicted_flat_gpu = torch.tensor(predicted_flat_cpu, device=device)
-            total_correct_gpu += (predicted_flat_gpu == active_targets).sum()
+            proxy_predicted = torch.argmax(emissions, dim=-1)
+            active_predictions = proxy_predicted[mask]
+            active_targets = target[mask]
+            total_correct_gpu += (active_predictions == active_targets).sum()
             total_samples_gpu += active_targets.numel()
 
     final_accuracy = (total_correct_gpu / total_samples_gpu).item() if total_samples_gpu > 0 else 0.0
