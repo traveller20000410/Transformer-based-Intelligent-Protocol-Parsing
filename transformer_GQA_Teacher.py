@@ -5,9 +5,14 @@ import time;      import math;                                  from transformer
 from joblib import load;                                        from torch.utils.checkpoint import checkpoint
 from sklearn.metrics import classification_report;              from sklearn.utils.class_weight import compute_class_weight # 导入一个方便的工具
 from torch.cuda.amp import autocast, GradScaler;                import xformers.ops as xops
-from xformers.ops.fmha import attn_bias
+from xformers.ops.fmha import attn_bias;                        import torch._dynamo
 from torch.optim.lr_scheduler import StepLR, MultiStepLR, ReduceLROnPlateau, CosineAnnealingLR
 
+@torch._dynamo.ignore
+def _fmha(q, k, v, p, bias):
+    # 这段永远不进 Dynamo graph，直接走 xformers eager + Triton
+    return xops.memory_efficient_attention(q, k, v, p=p, attn_bias=bias)
+    
 # 定义超参数，包括批量大小、训练轮次、学习率等
 BATCH_SIZE =        128;                        EPOCHS =        500
 LEARNING_RATE =     0.0001;                     D_MODEL =       128
@@ -101,10 +106,10 @@ class GroupedQueryAttention(nn.Module):
         v = v.reshape(B, L, self.num_heads, self.head_dim)
 
         # 4. **核心修复**: 对于无padding的定长序列，我们不需要attn_bias    # 直接调用xformers，它会执行全局注意力
-        out = xops.memory_efficient_attention(
+        out = _fmha(
             q, k, v,
-            p=self.attn_dropout if self.training else 0.0,
-            attn_bias=None,  # <--- 明确地传入None
+            self.attn_dropout if self.training else 0.0,
+            None
         )
 
         # 5. reshape和输出投影
