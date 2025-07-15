@@ -68,7 +68,7 @@ def train_transformer_model(num_datasets=None):
     GQA_train_model(processed_dataset, processed_labels)
 
 
-def preprocess_dataset(dataset, labels, target_length=1250):
+def preprocess_dataset(dataset, labels, target_length=2000):
     original_data = np.array(dataset, dtype=np.float32)
     original_labels = np.array(labels, dtype=np.int64)
 
