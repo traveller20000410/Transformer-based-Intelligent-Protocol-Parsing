@@ -127,24 +127,41 @@ def export_scl_sda_from_4ch(data_4ch: np.ndarray, labels: np.ndarray, maps: list
     print(f">>> 已导出 {N} 条仅含 SCL/SDA 的 CSV 到：{base_dir}/")
 
 
-def preprocess_dataset(dataset, labels, target_length=2000):
+def preprocess_dataset(dataset, labels, target_length=2000, normalize=True, v_low=0.0, v_high=3.3):
+
     original_data = dataset
     original_labels = labels
+    N, L, C = original_data.shape  # 例如 C=4
 
-    num_datasets = original_data.shape[0]
-    original_length = original_data.shape[1]
+    # 1) 重采样 + 标签重采样
+    if L <= target_length:
+        print(f"Warning: Original length {L} is <= target {target_length}. Skipping resampling.")
+        resampled_data = original_data.astype(np.float32)
+        resampled_labels = original_labels
+    else:
+        from scipy.signal import resample
+        resampled_data = resample(original_data, target_length, axis=1)
+        factor = L // target_length
+        trimmed_labels = original_labels[:, :target_length * factor]
+        reshaped_labels = trimmed_labels.reshape(N, target_length, factor)
+        from scipy import stats
+        resampled_labels, _ = stats.mode(reshaped_labels, axis=2, keepdims=False)
 
-    if original_length <= target_length:
-        print(f"Warning: Original length {original_length} is <= target {target_length}. Skipping resampling.")
-        return original_data.astype(np.float32), original_labels
+    # 2) 固定范围归一化到 [0,1]（按通道广播）
+    if normalize:
+        import numpy as np
+        v_low_arr  = np.array(v_low,  dtype=np.float32).reshape(1, 1, -1) if np.ndim(v_low)  else np.full((1,1,C), v_low,  dtype=np.float32)
+        v_high_arr = np.array(v_high, dtype=np.float32).reshape(1, 1, -1) if np.ndim(v_high) else np.full((1,1,C), v_high, dtype=np.float32)
 
-    resampled_data = resample(original_data, target_length, axis=1)
-    factor = original_length // target_length
-    trimmed_labels = original_labels[:, :target_length * factor]
-    reshaped_labels = trimmed_labels.reshape(num_datasets, target_length, factor)
-    resampled_labels, _ = stats.mode(reshaped_labels, axis=2, keepdims=False)
+        # 防止除零
+        denom = (v_high_arr - v_low_arr)
+        denom[denom == 0] = 1e-6
+
+        resampled_data = (resampled_data - v_low_arr) / denom
+        resampled_data = np.clip(resampled_data, 0.0, 1.0)
 
     return resampled_data.astype(np.float32), resampled_labels.astype(np.int64)
+
 
 # def generate_test_protocols_dataset(num_datasets=None):
 #     # 生成测试数据以预测标签
