@@ -217,7 +217,7 @@ def train(model, train_loader, optimizer, device,scaler,scheduler,weight_tensor=
             active_loss_mask = mask.view(-1) == 1
             active_emissions = emissions_flat[active_loss_mask]
             active_targets = target_flat[active_loss_mask]
-            cross_entropy_func = nn.CrossEntropyLoss(weight=weight_tensor)
+            cross_entropy_func = nn.CrossEntropyLoss(weight=weight_tensor, label_smoothing=0.1) # 0.1是一个常用的值
             loss_ce = cross_entropy_func(active_emissions, active_targets)
             loss = loss_crf + alpha * loss_ce
 
@@ -528,7 +528,7 @@ def test(model, test_loader, device, scaler, weight_tensor=None, alpha=0.5):
                 active_emissions = emissions_flat[active_loss_mask]
                 active_targets = target_flat[active_loss_mask]
 
-                cross_entropy_func = nn.CrossEntropyLoss(weight=weight_tensor)
+                cross_entropy_func = nn.CrossEntropyLoss(weight=weight_tensor, label_smoothing=0.1) # 0.1是一个常用的值
                 loss_ce = cross_entropy_func(active_emissions, active_targets) if weight_tensor is not None else 0
                 loss = loss_crf + alpha * loss_ce if weight_tensor is not None else loss_crf
                 # --- 结束组合损失计算 ---
