@@ -406,8 +406,12 @@ class RealisticI2CSignalGenerator:
         for i in range(num_datasets):
             scl_raw, sda_raw, labels_raw, events_raw = self.generate_i2c_transaction()
             # 随机映射到 4 通道
-            ch_indices = np.random.choice(4, 2, replace=False)
-            scl_ch, sda_ch = int(ch_indices[0]), int(ch_indices[1])
+            # ch_indices = np.random.choice(4, 2, replace=False)
+            # scl_ch, sda_ch = int(ch_indices[0]), int(ch_indices[1])
+
+            # 固定 SCL 为通道 0, SDA 为通道 1
+            scl_ch, sda_ch = 0, 1
+            
             all_channel_maps.append((scl_ch, sda_ch))
             # 构建 4 通道波形，并添加微小噪声
             final_waveform_4ch = np.full((samples_per_dataset, 4),self.voltage_high, dtype=np.float32)
