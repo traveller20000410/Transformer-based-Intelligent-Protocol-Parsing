@@ -389,6 +389,31 @@ def train_model(protocols_dataset, protocol_labels):
         print(f"--- Resumed from epoch {start_epoch}, best_val_loss: {best_val_loss:.4f} ---")
     else:
         print("--- No checkpoint found, starting training from scratch. ---")
+    ###打印超参数配置
+    print("\n" + "=" * 60)
+    print(" " * 15 + "Starting Training with Configuration")
+    print("=" * 60)
+
+    print(f"{'--- Model Architecture ---':^60}")
+    print(f"{'D_MODEL':<25}: {D_MODEL}")
+    print(f"{'NUM_LAYERS':<25}: {NUM_LAYERS}")
+    print(f"{'NUM_HEADS':<25}: {NUM_HEADS}")
+    print(f"{'NUM_GROUPS (for GQA)':<25}: {NUM_GROUPS}")
+    print(f"{'MAX_LENGTH':<25}: {MAX_LENGTH}")
+
+    print(f"\n{'--- Training Parameters ---':^60}")
+    print(f"{'EPOCHS':<25}: {EPOCHS}")
+    print(f"{'BATCH_SIZE':<25}: {BATCH_SIZE}")
+    print(f"{'LEARNING_RATE':<25}: {LEARNING_RATE}")
+    print(f"{'PATIENCE (Early Stop)':<25}: {PATIENCE}")
+    print(f"{'DROPOUT':<25}: {DROPOUT}")
+
+    print(f"\n{'--- CRF+CE Loss Alpha ---':^60}")
+    print(f"{'INITIAL_ALPHA':<25}: {INITIAL_ALPHA}")
+    print(f"{'FINAL_ALPHA':<25}: {FINAL_ALPHA}")
+    print(f"{'ALPHA_DECAY_EPOCHS':<25}: {int(ALPHA_DECAY_EPOCHS)}")
+
+    print("=" * 60 + "\n")
 
     # 训练和测试模型
     model.to(device);
