@@ -127,7 +127,7 @@ def export_scl_sda_from_4ch(data_4ch: np.ndarray, labels: np.ndarray, maps: list
     print(f">>> 已导出 {N} 条仅含 SCL/SDA 的 CSV 到：{base_dir}/")
 
 
-def preprocess_dataset(dataset, labels, target_length=2000, normalize=True, v_low=0.0, v_high=3.3):
+def preprocess_dataset(dataset, labels, target_length=1250, normalize=True, v_low=0.0, v_high=3.3):
 
     original_data = dataset
     original_labels = labels
