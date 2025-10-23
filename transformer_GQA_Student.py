@@ -1,417 +1,501 @@
-import torch,   torchcrf,   torch.onnx,    torch.nn as nn,   torch.nn.functional as F   ,os
-from torch.utils.data import Dataset, DataLoader
+# 文件名: transformer_GQA_Student.py
+
+import torch, torchcrf, torch.onnx, torch.nn as nn, torch.nn.functional as F, os
+from torch.utils.data import Dataset, DataLoader;
 from sklearn.model_selection import train_test_split
-import numpy as np
-import time;                                                    import torch.profiler
-from joblib import load
-from sklearn.metrics import classification_report;              from sklearn.utils.class_weight import compute_class_weight # 导入一个方便的工具
-from torch.utils.checkpoint import checkpoint
-from torch.cuda.amp import autocast, GradScaler
-from transformer_component import weighted_cross_entropy_loss,check_pth_is_accessible,export_to_onnx,loss_result_plt,preprocess_data
+import numpy as np;
+from torch.profiler import profile, ProfilerActivity, schedule, tensorboard_trace_handler
+import time;
+import math;
+from transformer_component import weighted_cross_entropy_loss, check_pth_is_accessible, export_to_onnx, loss_result_plt, \
+    preprocess_data
+from joblib import load;
+# 移除了 checkpoint
+from sklearn.metrics import classification_report;
+from sklearn.utils.class_weight import compute_class_weight
+from torch.cuda.amp import autocast, GradScaler;
+# 移除了 xformers 和 dynamo
 from torch.optim.lr_scheduler import StepLR, MultiStepLR, ReduceLROnPlateau, CosineAnnealingLR
 
-# 定义超参数，包括批量大小、训练轮次、学习率等
-BATCH_SIZE =        32;                         EPOCHS =        600
-LEARNING_RATE =     0.0001;                     D_MODEL =       30
-NUM_HEADS =         6;                          NUM_LAYERS =    4
-DROPOUT =           0.1 ;                       MAX_LENGTH =    1000
-NUM_GROUPS = 2 ;                                PATIENCE=       30;
-# 自定义数据集类，用于存储协议数据和标签
-class ProtocolDataset(Dataset):
-    def __init__(self, data, labels):
-        self.data = data ;           self.labels = labels
-    def __len__(self):
-        return len(self.data)
-    def __getitem__(self, idx):
-        # 将数据和标签转换为张量
-        return torch.tensor(self.data[idx], dtype=torch.long), torch.tensor(self.labels[idx], dtype=torch.long)
+# --- 学生模型的超参数 ---
+# 架构参数被显著减小
+BATCH_SIZE = 256;  # 保持与教师一致或适当调大
+EPOCHS = 500  # 蒸馏可能需要更多/更少时间，取决于收敛情况
+LEARNING_RATE = 0.0003;  # 学生模型学习率可以适当调高
+D_MODEL = 64;  # (教师是 256)
+NUM_HEADS = 8;  # (教师是 8)
+NUM_LAYERS = 4;  # (教师是 12)
+DROPOUT = 0.1;
+MAX_LENGTH = 1250
+NUM_GROUPS = 8;  # (教师是 2)，这里设为8，使其变为 MHA
+PATIENCE = 30;  # 蒸馏训练可能需要更多耐心
+INITIAL_ALPHA = 0.5;  # "硬" 损失 (CE+CRF) 的权重
+FINAL_ALPHA = 0.1
+ALPHA_DECAY_EPOCHS = EPOCHS * 0.7
 
-# 位置编码函数，为输入添加位置信息
-def positional_encoding(max_length, d_model):
-    pe = torch.zeros(max_length, d_model, dtype=torch.float32)
-    position = torch.arange(0, max_length).unsqueeze(1)
-    div_term = torch.exp(torch.arange(0, d_model, 2) * (-np.log(10000.0) / d_model))
-    pe[:, 0::2] = torch.sin(position * div_term);       pe[:, 1::2] = torch.cos(position * div_term)
-    pe = pe.unsqueeze(0)  # (1, max_length, d_model)
-    return pe
+# --- 知识蒸馏超参数 ---
+KD_ALPHA = 0.7;  # 知识蒸馏损失的权重 (70% 损失来自蒸馏)
+TEMPERATURE = 2.0;  # 蒸馏温度，用于平滑教师的输出
+
+
+# --- 从教师模型复制的组件 (无修改) ---
+
+class ProtocolTensorDataset(Dataset):
+    def __init__(self, data_tensor, labels_tensor):
+        assert data_tensor.size(0) == labels_tensor.size(0)
+        self.data_tensor = data_tensor
+        self.labels_tensor = labels_tensor
+
+    def __getitem__(self, index):
+        return self.data_tensor[index], self.labels_tensor[index]
+
+    def __len__(self):
+        return self.data_tensor.size(0)
+
+
+class RotaryEmbedding(nn.Module):
+    def __init__(self, dim, max_position_embeddings=MAX_LENGTH):
+        super().__init__()
+        inv_freq = 1.0 / (10000 ** (torch.arange(0, dim, 2).float() / dim))
+        positions = torch.arange(max_position_embeddings, dtype=torch.float32)
+        sinusoid_inp = torch.einsum("i,j->ij", positions, inv_freq)
+        self.register_buffer("cos_cached", torch.cos(sinusoid_inp).half())
+        self.register_buffer("sin_cached", torch.sin(sinusoid_inp).half())
+
+    def forward(self, seq_len):
+        cos = self.cos_cached[:seq_len].unsqueeze(0).unsqueeze(0)
+        sin = self.sin_cached[:seq_len].unsqueeze(0).unsqueeze(0)
+        return cos, sin
+
+
+def apply_rotary_pos_emb(q, k, cos, sin):
+    # q, k: [B, H, L, Dh]
+    q1, q2 = q[..., ::2], q[..., 1::2]
+    k1, k2 = k[..., ::2], k[..., 1::2]
+    q_rot = torch.cat([q1 * cos - q2 * sin,
+                       q1 * sin + q2 * cos], dim=-1)
+    k_rot = torch.cat([k1 * cos - k2 * sin,
+                       k1 * sin + k2 * cos], dim=-1)
+    return q_rot, k_rot
+
+
+class FeedForward(nn.Module):
+    def __init__(self, d_model, d_ff_multiplier=4, dropout=DROPOUT):
+        super(FeedForward, self).__init__()
+        d_ff = d_model * d_ff_multiplier
+        self.linear1 = nn.Linear(d_model, d_ff)
+        self.linear2 = nn.Linear(d_ff, d_model)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x):
+        x = F.gelu(self.linear1(x))
+        x = self.dropout(x)
+        x = self.linear2(x)
+        return x
+
+
+# --- 修改后的学生模型组件 ---
 
 class GroupedQueryAttention(nn.Module):
-    def __init__(self, d_model, num_heads, num_groups):
-        super(GroupedQueryAttention, self).__init__()
+    """
+    学生版的 GQA，使用 PyTorch 内置的 SDPA 替换 xformers。
+    这对于 CPU 推理至关重要。
+    """
+
+    def __init__(self, d_model, num_heads, num_groups, dropout=DROPOUT,
+                 max_position_embeddings=MAX_LENGTH):
+        super().__init__()
         self.d_model = d_model
         self.num_heads = num_heads
         self.num_groups = num_groups
         self.head_dim = d_model // num_heads
-        # 确保分组数量能够整除注意力头数
         assert num_heads % num_groups == 0, "num_heads must be divisible by num_groups"
-        # 线性变换层
-        self.W_q = nn.Linear(d_model, d_model)  # 查询变换
-        self.W_k = nn.Linear(d_model, d_model // num_groups)  # 键变换（分组共享）
-        self.W_v = nn.Linear(d_model, d_model // num_groups)  # 值变换（分组共享）
-        self.W_o = nn.Linear(d_model, d_model)  # 输出变换
+        kv_dim = num_groups * self.head_dim
+
+        self.W_q = nn.Linear(d_model, d_model)
+        self.W_k = nn.Linear(d_model, kv_dim)
+        self.W_v = nn.Linear(d_model, kv_dim)
+        self.W_o = nn.Linear(d_model, d_model)
+
+        self.rotary_emb = RotaryEmbedding(self.head_dim, max_position_embeddings)
+        self.attn_dropout = dropout
 
     def forward(self, query, key, value, mask=None):
-        batch_size = query.size(0)
+        B, L, _ = query.size()
 
-        # 线性变换
-        q = self.W_q(query)  # (batch_size, seq_len, d_model)
-        k = self.W_k(key)    # (batch_size, seq_len, d_model // num_groups)
-        v = self.W_v(value)  # (batch_size, seq_len, d_model // num_groups)
-        # 重塑为多头形式
-        q = q.view(batch_size, -1, self.num_heads, self.head_dim).transpose(1, 2)  # (batch_size, num_heads, seq_len, head_dim)
-        k = k.view(batch_size, -1, self.num_groups, self.head_dim).transpose(1, 2)  # (batch_size, num_groups, seq_len, head_dim)
-        v = v.view(batch_size, -1, self.num_groups, self.head_dim).transpose(1, 2)  # (batch_size, num_groups, seq_len, head_dim)
-        # 广播键和值到每个查询组
-        k = k.repeat_interleave(self.num_heads // self.num_groups, dim=1)  # (batch_size, num_heads, seq_len, head_dim)
-        v = v.repeat_interleave(self.num_heads // self.num_groups, dim=1)  # (batch_size, num_heads, seq_len, head_dim)
-        # 计算注意力分数
-        scores = torch.matmul(q, k.transpose(-2, -1)) / torch.sqrt(torch.tensor(self.head_dim, dtype=torch.float32))  # (batch_size, num_heads, seq_len, seq_len)
-        if mask is not None:
-            mask = mask.unsqueeze(1).unsqueeze(-1)  # 扩展 mask 维度
-            scores = scores.masked_fill(mask.to(torch.bool) == 0, -1e4)  # 应用 mask
-        # 计算注意力权重
-        attn_weights = F.softmax(scores, dim=-1)
-        # 计算注意力输出
-        attn_output = torch.matmul(attn_weights, v)  # (batch_size, num_heads, seq_len, head_dim)
-        attn_output = attn_output.transpose(1, 2).contiguous().view(batch_size, -1, self.d_model)  # (batch_size, seq_len, d_model)
-        # 输出变换
-        output = self.W_o(attn_output)
-        return output, attn_weights
+        # 1. 独立投影 Q, K, V
+        q = self.W_q(query).view(B, L, self.num_heads, self.head_dim)
+        k = self.W_k(key).view(B, L, self.num_groups, self.head_dim)
+        v = self.W_v(value).view(B, L, self.num_groups, self.head_dim)
 
-# 前馈网络类
-class FeedForward(nn.Module):
-        def __init__(self, d_model, d_ff=512):
-            super(FeedForward, self).__init__()
-            self.linear1 = nn.Linear(d_model, d_ff)
-            self.linear2 = nn.Linear(d_ff, d_model)
+        # 2. GQA的核心：为K和V复制头数
+        k = k.repeat_interleave(self.num_heads // self.num_groups, dim=2)
+        v = v.repeat_interleave(self.num_heads // self.num_groups, dim=2)
 
-        def forward(self, x):
-            x = F.gelu(self.linear1(x))
-            x = self.linear2(x)
-            return x
+        # 3. 调整形状以适应 SDPA (B, H, L, Dh)
+        q = q.transpose(1, 2)
+        k = k.transpose(1, 2)
+        v = v.transpose(1, 2)  # 教师代码中这里是 reshape
 
-# Transformer 编码器层类
+        # 4. 应用旋转位置编码 (RoPE)
+        cos, sin = self.rotary_emb(L)
+        q, k = apply_rotary_pos_emb(q, k, cos, sin)  # q, k 仍是 (B, H, L, Dh)
+
+        # 5. **核心修改**: 调用 PyTorch 2.0+ 的 scaled_dot_product_attention (CPU / GPU 通用)
+        out = F.scaled_dot_product_attention(
+            q, k, v,
+            attn_mask=None,  # 我们的序列是定长的，不需要 mask
+            dropout_p=self.attn_dropout if self.training else 0.0
+        )
+
+        # 6. reshape和输出投影
+        out = out.transpose(1, 2).reshape(B, L, self.d_model)  # (B, H, L, Dh) -> (B, L, H, Dh) -> (B, L, D_MODEL)
+        return self.W_o(out)
+
+
 class TransformerEncoderLayer(nn.Module):
+    """
+    学生版的 EncoderLayer，移除了梯度检查点。
+    """
+
     def __init__(self, d_model, num_heads, dropout, num_groups):
         super(TransformerEncoderLayer, self).__init__()
-        self.attention = GroupedQueryAttention(d_model, num_heads, num_groups)
-        self.ffn = FeedForward(d_model)
-        self.norm1 = nn.LayerNorm(d_model);     self.norm2 = nn.LayerNorm(d_model)
-        self.dropout1 = nn.Dropout(dropout);    self.dropout2 = nn.Dropout(dropout)
+        self.attention = GroupedQueryAttention(d_model, num_heads, num_groups, dropout=dropout)
+        self.ffn = FeedForward(d_model, dropout=dropout)
+        self.norm1 = nn.LayerNorm(d_model)
+        self.norm2 = nn.LayerNorm(d_model)
 
     def forward(self, x, mask=None):
-        def custom_forward(x):
-            attn_output, _ = self.attention(x, x, x, mask)
-            # 调整 attn_output 的维度，确保与 x 维度匹配
-            if attn_output.size(1) != x.size(1):
-                attn_output = attn_output[:, :x.size(1), :]
-            x = self.norm1(x + self.dropout1(attn_output))
-            ffn_output = self.ffn(x)
-            x = self.norm2(x + self.dropout2(ffn_output));
-            return x
-        x = checkpoint(custom_forward, x, use_reentrant=False)
+        # **核心修改**: 移除 checkpoint(custom_forward, ...)
+        # 直接执行前向传播
+        norm_x = self.norm1(x)
+        attn_output = self.attention(norm_x, norm_x, norm_x, mask)
+        x = x + attn_output  # 第一个残差连接
+
+        norm_x2 = self.norm2(x)
+        ffn_output = self.ffn(norm_x2)
+        x = x + ffn_output  # 第二个残差连接
         return x
+
+
+# --- 从教师模型复制的模型主干 (无修改) ---
 
 class TransformerEncoder(nn.Module):
     def __init__(self, num_layers, d_model, num_heads, dropout, num_groups):
         super(TransformerEncoder, self).__init__()
-        self.layers = nn.ModuleList([TransformerEncoderLayer(d_model, num_heads, dropout, num_groups) for _ in range(num_layers)])
+        self.layers = nn.ModuleList(
+            [TransformerEncoderLayer(d_model, num_heads, dropout, num_groups) for _ in range(num_layers)])
 
     def forward(self, x, mask=None):
         for layer in self.layers:  x = layer(x, mask)
         return x
 
+
 class TransformerModel(nn.Module):
-    def __init__(self, input_dim, output_dim, max_length, d_model, num_heads, num_layers, dropout, num_groups):
+    def __init__(self, output_dim, max_length, d_model, num_heads, num_layers, dropout, num_groups):
         super(TransformerModel, self).__init__()
-        self.scl_embedding = nn.Embedding(input_dim, d_model // 2, padding_idx=0)
-        self.sda_embedding = nn.Embedding(input_dim, d_model // 2, padding_idx=0)
-        pe = positional_encoding(max_length, d_model)
-        self.register_buffer('pos_encoding', pe)
+        self.input_projection = nn.Linear(4, d_model)  # 假设输入还是 4 通道
         self.encoder = TransformerEncoder(num_layers, d_model, num_heads, dropout, num_groups)
         self.fc = nn.Linear(d_model, output_dim)
-        self.crf = torchcrf.CRF(output_dim, batch_first=True)  # 添加 CRF 层
+        self.crf = torchcrf.CRF(output_dim, batch_first=True)
 
     def forward(self, x):
-        mask = (x[..., 0] != 0).to(x.device)
-
-        scl_tokens = x[..., 0].long()
-        sda_tokens = x[..., 1].long()
-
-        scl_embedded = self.scl_embedding(scl_tokens)
-        sda_embedded = self.sda_embedding(sda_tokens)
-
-        x_embedded = torch.cat([scl_embedded, sda_embedded], dim=-1)
-        x = x_embedded + self.pos_encoding[:, :x_embedded.size(1), :].to(x.device)
-        x = self.encoder(x, mask=mask)
-        emissions = self.fc(x)
-
+        x_features = self.input_projection(x)
+        mask = torch.ones(x_features.shape[0], x_features.shape[1], dtype=torch.bool, device=x.device)
+        encoded_output = self.encoder(x_features, mask=mask)
+        emissions = self.fc(encoded_output)
         return emissions, mask
 
-# 训练函数，包括前向传播、计算损失、反向传播和参数更新
-def train(model, train_loader, optimizer, device,scaler,scheduler,weight_tensor=None, alpha=0.5):
-    model.train()
+
+# --- 新的知识蒸馏训练函数 ---
+
+def train_distill(model, teacher_model, train_loader, optimizer, device, scaler,
+                  weight_tensor=None, alpha=0.5, kd_alpha=0.5, temperature=2.0, do_profiling=False):
+    """
+    知识蒸馏的内部训练循环
+    """
+    model.train()  # 学生模型设为训练模式
+    teacher_model.eval()  # 教师模型设为评估模式
+
     running_loss = 0.0
-    correct = 0
-    total = 0
-    with torch.profiler.profile(
-            schedule=torch.profiler.schedule(wait=1, warmup=1, active=1),
-            on_trace_ready=torch.profiler.tensorboard_trace_handler('./log'),
-            record_shapes=True,
-            with_stack=True
-    ) as prof:
-        for batch_idx, (data, target) in enumerate(train_loader):
-            data, target = data.to(device), target.to(device)
-            optimizer.zero_grad()
-            # 混合精度训练
-            with torch.amp.autocast('cuda'):
-                emissions,mask = model(data)  # (batch_size, seq_len, num_classes)
-                #计算组合损失
-                loss_crf = -model.crf(emissions, target, mask=mask)
-                emissions_flat = emissions.view(-1, emissions.shape[-1])
-                target_flat = target.view(-1)
-                active_loss_mask = mask.view(-1) == 1
-                active_emissions = emissions_flat[active_loss_mask]
-                active_targets = target_flat[active_loss_mask]
-                cross_entropy_func = nn.CrossEntropyLoss(weight=weight_tensor)
-                loss_ce = cross_entropy_func(active_emissions, active_targets)
-                loss = loss_crf + alpha * loss_ce
+    running_hard_loss = 0.0
+    running_kd_loss = 0.0
+    total_correct_gpu = torch.tensor(0.0, device=device)
+    total_samples_gpu = torch.tensor(0.0, device=device)
 
-                scaler.scale(loss).backward()
-                scaler.step(optimizer)
-                scaler.update()
+    cross_entropy_func = nn.CrossEntropyLoss(weight=weight_tensor, label_smoothing=0.1)
 
-            running_loss += loss.item()
-            predicted = model.crf.decode(emissions, mask)  # 使用 CRF 解码得到预测结果
-            predicted = [item for sublist in predicted for item in sublist]
-            target = target[mask].view(-1).tolist()
-            total += len(target)
-            correct += sum(p == t for p, t in zip(predicted, target))
+    # 定义 KL 散度损失 (蒸馏损失)
+    distill_loss_func = nn.KLDivLoss(reduction='batchmean')
 
-            if prof.step_num >= 2:  # 仅在 warmup 阶段之后开始打印
-                print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=10))
-    return running_loss / len(train_loader), correct / total
+    for batch_idx, (data, target) in enumerate(train_loader):
+        data, target = data.to(device), target.to(device)
+        optimizer.zero_grad()
 
-def train_model(protocols_dataset, protocol_labels,num_groups=D_MODEL):
-    # 数据预处理
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    x_train, x_test, y_train, y_test,label_encoder = preprocess_data(protocols_dataset, protocol_labels)
-    x_train, x_val, y_train, y_val = train_test_split(x_train, y_train, test_size=0.1, random_state=42)  # 划分验证集
+        # 1. 获取教师模型的输出 (不需要梯度)
+        with torch.no_grad():
+            teacher_emissions, teacher_mask = teacher_model(data)
 
-    #计算类别权重
-    all_train_labels = np.concatenate([y.flatten() for y in y_train])
-    class_weights = compute_class_weight('balanced', classes=np.unique(all_train_labels), y=all_train_labels)
-    class_weights_tensor = torch.tensor(class_weights, dtype=torch.float32).to(device)
-    print("Computed Class Weights:")
-    print(", ".join(f"{label_encoder.classes_[i]}: {w:.4f}"  for i, w in enumerate(class_weights)))
+        # 2. 正常执行学生模型的前向传播
+        with torch.amp.autocast('cuda'):
+            student_emissions, mask = model(data)
 
-    # 创建数据加载器
-    train_dataset = ProtocolDataset(x_train, y_train)
-    val_dataset = ProtocolDataset(x_val, y_val) ; test_dataset = ProtocolDataset(x_test, y_test)
-    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, drop_last=False,num_workers=2, pin_memory=True)
-    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, drop_last=False,num_workers=2, pin_memory=True)
-    test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False, drop_last=False,num_workers=2, pin_memory=True)
+            # --- 3. 计算 "Hard Loss" (学生 vs 真实标签) ---
+            loss_crf = -model.crf(student_emissions, target, mask=mask)
 
-    # 初始化模型、损失函数和优化器
-    input_dim = 21 ; output_dim = len(label_encoder.classes_)  #16
-    model = TransformerModel(input_dim, output_dim, MAX_LENGTH, D_MODEL, NUM_HEADS, NUM_LAYERS, DROPOUT,NUM_GROUPS)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE,weight_decay=1e-5)
-    scaler = torch.amp.GradScaler('cuda')
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS)
+            emissions_flat = student_emissions.view(-1, student_emissions.shape[-1])
+            target_flat = target.view(-1)
+            active_loss_mask = mask.view(-1) == 1
 
-    checkpoint_path = 'checkpoint.pth' # 中断时保存的检查点路径
-    best_model_path = 'best_transformer_model.pth'
-    best_val_loss = float('inf');       start_epoch = 0
-    counter = 0  # 记录验证集损失不下降的次数
-    train_losses_per_epoch = [];        val_losses_per_epoch = [];     test_losses_per_epoch = []
-    # model,optimizer,scaler,start_epoch,best_val_loss=check_pth_is_accessible(checkpoint_path,model, optimizer, scaler,device)  #加载保存的模型
+            active_student_emissions = emissions_flat[active_loss_mask]
+            active_targets = target_flat[active_loss_mask]
 
-    #检查是否有已经存在的模型存档
-    if os.path.exists(checkpoint_path):
-        print(f"--- Resuming training from checkpoint: {checkpoint_path} ---")
-        checkpoint = torch.load(checkpoint_path, weights_only=False,map_location='cpu')
-        model.load_state_dict(checkpoint['model_state_dict'])
-        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        scaler.load_state_dict(checkpoint['scaler_state_dict'])
+            loss_ce = cross_entropy_func(active_student_emissions, active_targets)
+            loss_hard = loss_crf + alpha * loss_ce
 
-        # 确保所有状态移动到当前设备
-        model = model.to(device)
-        for state in optimizer.state.values():
-            for k, v in state.items():
-                if isinstance(v, torch.Tensor):
-                    state[k] = v.to(device)
+            # --- 4. 计算 "Soft Loss" (学生 vs 教师) ---
+            # 找到教师输出的对应部分
+            active_teacher_emissions = teacher_emissions.view(-1, teacher_emissions.shape[-1])[active_loss_mask]
 
-        # # 只有当检查点里有scheduler状态时才加载
-        # if 'scheduler_state_dict' in checkpoint:
-        #     scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-        start_epoch = checkpoint.get('epoch', -1) + 1  # 使用.get()更安全
-        best_val_loss = checkpoint.get('best_val_loss', float('inf'))
-        # 恢复历史损失记录，以便绘图
-        train_losses_per_epoch = checkpoint.get('train_losses', [])
-        val_losses_per_epoch = checkpoint.get('val_losses', [])
-        test_losses_per_epoch = checkpoint.get('test_losses', [])
+            # 使用温度 T 平滑输出
+            soft_student_logits = F.log_softmax(active_student_emissions / temperature, dim=-1)
+            soft_teacher_probs = F.softmax(active_teacher_emissions / temperature, dim=-1)
 
-        print(f"--- Resumed from epoch {start_epoch}, best_val_loss: {best_val_loss:.4f} ---")
-    else:
-        print("--- No checkpoint found, starting training from scratch. ---")
+            # T^2 是为了让损失的梯度尺度与 hard loss 匹配
+            loss_kd = (temperature ** 2) * distill_loss_func(soft_student_logits, soft_teacher_probs)
 
-    # 训练和测试模型
-    model.to(device);
-    start_time = time.time()
-    try:
-        for epoch in range(start_epoch, EPOCHS):
-            train_loss, train_acc = train(model, train_loader, optimizer, device, scaler,scheduler,class_weights_tensor)
-            val_loss, val_acc = test(model, val_loader, device, scaler)  # 验证集评估
-            test_loss, test_acc = test(model, test_loader, device, scaler)
-            elapsed_time = time.time() - start_time
-            train_losses_per_epoch.append(train_loss); val_losses_per_epoch.append(val_loss); test_losses_per_epoch.append(test_loss)
-            scheduler.step()  # 更新学习率
-            print(f'/****Epoch {epoch + 1}, Learning Rate: {optimizer.param_groups[0]["lr"]}****/')
-            print(f'Epoch {epoch + 1}/{EPOCHS}: Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f}, '
-                  f'Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}, Test Loss: {test_loss:.4f}, Test Acc: {test_acc:.4f}')
-            print(f"Time elapsed: {elapsed_time:.2f} seconds")
+            # --- 5. 组合损失 ---
+            # (1-kd_alpha) * HardLoss + kd_alpha * SoftLoss
+            loss = (1.0 - kd_alpha) * loss_hard + kd_alpha * loss_kd
 
-            # —— 每 20 轮打印一次分类报告 —— #
-            if (epoch + 1) % 20 == 0:
-                # 在验证集上跑一次完整预测
-                all_preds, all_trues = [], []
-                model.eval()
-                with torch.no_grad():
-                    for data, target in test_loader:
-                        data, target = data.to(device), target.to(device)
-                        emissions, mask = model(data)
-                        preds = model.crf.decode(emissions, mask=mask)
-                        # 展平所有非 pad 标签
-                        for p_seq, t_seq, m in zip(preds, target, mask):
-                            length = m.sum().item()
-                            all_preds.extend(p_seq[:length])
-                            all_trues.extend(t_seq[:length].cpu().tolist())
-                # 打印分类报告
-                str_names = label_encoder.classes_.astype(str).tolist()
-                print(f"\n=== Classification Report at Epoch {epoch + 1} ===")
-                print(classification_report(all_trues, all_preds, target_names=str_names))
-                print("=== End Report ===\n")
-                model.train()
+        # 反向传播
+        scaler.scale(loss).backward()
+        scaler.step(optimizer)
+        scaler.update()
 
-            # 早停机制
-            if val_loss < best_val_loss:
-                best_val_loss = val_loss;                    counter = 0
-                torch.save(model.state_dict(), 'best_transformer_model.pth')
-            else:
-                counter += 1
-                if counter >= PATIENCE:
-                    print("Early stopping")
-                    break
-            # # 更新学习率调度器
-            # scheduler.step(val_loss)
+        running_loss += loss.item()
+        running_hard_loss += loss_hard.item()
+        running_kd_loss += loss_kd.item()
 
-            # 保存检查点
-            if epoch>=1:
-                torch.save({'epoch': epoch,                 'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(), 'scheduler_state_dict': scheduler.state_dict(),
-                'scaler_state_dict': scaler.state_dict(),       'best_val_loss': best_val_loss,
-                'label_encoder': label_encoder,                 'train_losses': train_losses_per_epoch,
-                'val_losses': val_losses_per_epoch,             'test_losses': test_losses_per_epoch
-                }, checkpoint_path);                             print(f"已保存检查点到 {checkpoint_path}")
+        # 计算精度 (基于学生的 "硬" 预测)
+        with torch.no_grad():
+            proxy_predicted = torch.argmax(student_emissions, dim=-1)
+            active_predictions = proxy_predicted[mask]
+            total_correct_gpu += (active_predictions == active_targets).sum()
+            total_samples_gpu += active_targets.numel()
 
-    except KeyboardInterrupt:
-        print("训练中断，保存当前检查点...")
-        # torch.save({'epoch': epoch,                     'model_state_dict': model.state_dict(),
-        # 'optimizer_state_dict': optimizer.state_dict(),   # 'scheduler_state_dict': scheduler.state_dict(),
-        # 'scaler_state_dict': scaler.state_dict(),            'best_val_loss': best_val_loss
-        # }, checkpoint_path)
-        # print(f"已保存检查点到 {checkpoint_path}");            print("退出训练。")
+    final_accuracy = (total_correct_gpu / total_samples_gpu).item() if total_samples_gpu > 0 else 0.0
 
-        return model, label_encoder  # 或者您可以选择重新抛出异常
+    return (running_loss / len(train_loader),
+            running_hard_loss / len(train_loader),
+            running_kd_loss / len(train_loader),
+            final_accuracy)
 
-    # 在训练集上评估
-    train_predictions = [];             train_true_labels = []
-    model.to(device)
-    with torch.no_grad():
-        for data, target in train_loader:
-            data, target = data.to(device), target.to(device)
-            emissions, mask = model(data)
-            predicted = model.crf.decode(emissions, mask=mask)
-            for pred_seq, tgt_seq, m in zip(predicted, target, mask):
-                # 仅考虑非填充部分
-                seq_len = m.sum().item()
-                train_predictions.extend(pred_seq[:seq_len])
-                train_true_labels.extend(tgt_seq[:seq_len].cpu().numpy())
-    print("Training set classification report:")
-    print(classification_report(train_true_labels, train_predictions,target_names=label_encoder.classes_))
-    # 在测试集上评估
-    test_predictions = [];              test_true_labels = []
-    with torch.no_grad():
-        for data, target in test_loader:
-            data, target = data.to(device), target.to(device)
-            emissions, mask = model(data)
-            predicted = model.crf.decode(emissions, mask=mask)
-            for pred_seq, tgt_seq, m in zip(predicted, target, mask):
-                seq_len = m.sum().item()
-                test_predictions.extend(pred_seq[:seq_len])
-                test_true_labels.extend(tgt_seq[:seq_len].cpu().numpy())
-    print("Test set classification report:")
-    str_names = [str(c) for c in label_encoder.classes_]
-    print(classification_report(test_true_labels,test_predictions,target_names=str_names))
-    loss_result_plt(train_losses_per_epoch, val_losses_per_epoch, test_losses_per_epoch) #画出损失函数曲线
 
-    return model, label_encoder
-
-# 测试函数，计算损失和准确率
+# --- 验证函数 (从教师模型复制过来，用于评估) ---
 def test(model, test_loader, device, scaler, weight_tensor=None, alpha=0.5):
     model.eval()
     running_loss = 0.0
-    correct = 0
-    total = 0
+    total_correct_gpu = torch.tensor(0.0, device=device)
+    total_samples_gpu = torch.tensor(0.0, device=device)
+
     with torch.no_grad():
         for batch_idx, (data, target) in enumerate(test_loader):
             data, target = data.to(device), target.to(device)
             with torch.amp.autocast('cuda'):
                 emissions, mask = model(data)
 
-                # --- 为了和训练loss可比，这里也计算组合损失 ---
+                # 在验证时，我们只关心 "Hard Loss"
                 loss_crf = -model.crf(emissions, target, mask=mask)
                 emissions_flat = emissions.view(-1, emissions.shape[-1])
                 target_flat = target.view(-1)
                 active_loss_mask = mask.view(-1) == 1
                 active_emissions = emissions_flat[active_loss_mask]
                 active_targets = target_flat[active_loss_mask]
-                cross_entropy_func = nn.CrossEntropyLoss(weight=weight_tensor)
-                loss_ce = cross_entropy_func(active_emissions, active_targets) if weight_tensor is not None else 0
-                loss = loss_crf + alpha * loss_ce if weight_tensor is not None else loss_crf
-                # --- 结束组合损失计算 ---
+
+                cross_entropy_func = nn.CrossEntropyLoss(weight=weight_tensor, label_smoothing=0.1)
+                loss_ce = cross_entropy_func(active_emissions, active_targets)
+                loss = loss_crf + alpha * loss_ce
 
                 running_loss += loss.item()
-                # 使用 CRF 解码得到预测结果
+
+                # 计算精度
                 predicted = model.crf.decode(emissions, mask=mask)
-                # 准确率计算
-                predicted = [item for sublist in predicted for item in sublist]
-                target = target[mask].view(-1).tolist()
-                total += len(target)
-                correct += sum(p == t for p, t in zip(predicted, target))
-    return running_loss / len(test_loader), correct / total
+                predicted_flat_cpu = [p for sublist in predicted for p in sublist]
+                if not predicted_flat_cpu:  continue
+                predicted_flat_gpu = torch.tensor(predicted_flat_cpu, device=device)
 
-def predict_protocol(model, data):
-    device = next(model.parameters()).device  # 自动获取模型所在的设备
-    model.eval()
-    data = torch.tensor(np.array(data), dtype=torch.long).unsqueeze(0).to(device)
-    with torch.no_grad():
-        emissions, mask = model(data)
-        predicted = model.crf.decode(emissions, mask=mask)[0]
-        label_encoder = load('label_encoder.joblib')
-        predicted_protocol = label_encoder.inverse_transform(predicted)
-    return predicted_protocol[:len(data[0])]
+                total_correct_gpu += (predicted_flat_gpu == active_targets).sum()
+                total_samples_gpu += active_targets.numel()
+
+    final_accuracy = (total_correct_gpu / total_samples_gpu).item() if total_samples_gpu > 0 else 0.0
+    return running_loss / len(test_loader), final_accuracy
 
 
-def predict_with_model(model, test_data):
+# --- 新的知识蒸馏训练主函数 ---
+
+def train_model_distill(teacher_model, protocols_dataset, protocol_labels):
+    """
+    知识蒸馏的外部训练循环
+    """
+    print("Converting list of arrays to a single large NumPy array...")
+    all_data_np = np.array(protocols_dataset)
+    all_labels_np = np.array(protocol_labels)
+
+    print("Splitting dataset into training, validation, and test sets...")
+    indices = np.arange(all_data_np.shape[0])
+    train_val_indices, test_indices = train_test_split(indices, test_size=0.15, random_state=42, shuffle=True)
+    train_indices, val_indices = train_test_split(train_val_indices, test_size=0.1, random_state=42, shuffle=True)
+
+    x_train_np, y_train_np = all_data_np[train_indices], all_labels_np[train_indices]
+    x_val_np, y_val_np = all_data_np[val_indices], all_labels_np[val_indices]
+    x_test_np, y_test_np = all_data_np[test_indices], all_labels_np[test_indices]
+
+    del all_data_np, all_labels_np, protocols_dataset, protocol_labels
+    import gc
+    gc.collect()
+
+    from sklearn.preprocessing import LabelEncoder
+    label_encoder = LabelEncoder()
+    all_train_labels_flat = y_train_np.flatten()
+    label_encoder.fit(all_train_labels_flat)
+    class_weights = compute_class_weight('balanced', classes=np.unique(all_train_labels_flat), y=all_train_labels_flat)
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    predicted_protocol = predict_protocol(model, test_data)
-    return predicted_protocol
+    class_weights_tensor = torch.tensor(class_weights, dtype=torch.float32).to(device)
 
-def load_model(input_dim, output_dim, max_length, d_model, num_heads, num_layers, dropout):
-    model = TransformerModel(input_dim, output_dim, max_length, d_model, num_heads, num_layers, dropout,num_groups=NUM_GROUPS)
-    # model.load_state_dict(torch.load('checkpoint.pth'))
-    checkpoint = torch.load('checkpoint.pth')
-    model.load_state_dict(checkpoint['model_state_dict'])  # 仅加载模型权重
-    model.eval()
-    return model
+    print("Converting NumPy arrays to PyTorch Tensors and pinning memory...")
+    x_train_tensor = torch.from_numpy(x_train_np).float().pin_memory()
+    y_train_tensor = torch.from_numpy(y_train_np).long().pin_memory()
+    x_val_tensor = torch.from_numpy(x_val_np).float().pin_memory()
+    y_val_tensor = torch.from_numpy(y_val_np).long().pin_memory()
+    x_test_tensor = torch.from_numpy(x_test_np).float().pin_memory()
+    y_test_tensor = torch.from_numpy(y_test_np).long().pin_memory()
+
+    del x_train_np, y_train_np, x_val_np, y_val_np, x_test_np, y_test_np
+    gc.collect()
+
+    train_dataset = ProtocolTensorDataset(x_train_tensor, y_train_tensor)
+    val_dataset = ProtocolTensorDataset(x_val_tensor, y_val_tensor)
+    test_dataset = ProtocolTensorDataset(x_test_tensor, y_test_tensor)
+
+    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=4, pin_memory=True,
+                              persistent_workers=True)
+    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=4, pin_memory=True,
+                            persistent_workers=True)
+    test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=4, pin_memory=True,
+                             persistent_workers=True)
+
+    # --- 1. 冻结教师模型 ---
+    print(f"Freezing Teacher model and moving to {device}...")
+    teacher_model.to(device)
+    teacher_model.eval()
+    for param in teacher_model.parameters():
+        param.requires_grad = False
+    print("Teacher model frozen.")
+
+    # --- 2. 初始化学生模型 ---
+    output_dim = len(label_encoder.classes_)
+    # 使用学生模型的超参数
+    model = TransformerModel(output_dim, MAX_LENGTH, D_MODEL, NUM_HEADS, NUM_LAYERS, DROPOUT, NUM_GROUPS)
+    # model = torch.compile(model) # torch.compile() 在学生模型上也是一个好主意
+    model = model.to(device)
+
+    optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=1e-5)
+    scaler = torch.amp.GradScaler('cuda')
+    scheduler = torch.optim.CosineAnnealingLR(optimizer, T_max=EPOCHS)
+
+    checkpoint_path = 'student_checkpoint.pth'
+    best_model_path = 'best_student_model.pth'
+    best_val_loss = float('inf');
+    start_epoch = 0
+    counter = 0
+    train_losses_per_epoch = [];
+    val_losses_per_epoch = [];
+
+    # (您可以添加与教师模型类似的检查点加载逻辑)
+    if os.path.exists(checkpoint_path):
+        print(f"--- Resuming student training from checkpoint: {checkpoint_path} ---")
+        checkpoint = torch.load(checkpoint_path, weights_only=False, map_location='cpu')
+        model.load_state_dict(checkpoint['model_state_dict'])
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        scaler.load_state_dict(checkpoint['scaler_state_dict'])
+        model = model.to(device)
+        for state in optimizer.state.values():
+            for k, v in state.items():
+                if isinstance(v, torch.Tensor):
+                    state[k] = v.to(device)
+        if 'scheduler_state_dict' in checkpoint:
+            scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+        start_epoch = checkpoint.get('epoch', -1) + 1
+        best_val_loss = checkpoint.get('best_val_loss', float('inf'))
+        train_losses_per_epoch = checkpoint.get('train_losses', [])
+        val_losses_per_epoch = checkpoint.get('val_losses', [])
+        print(f"--- Resumed student from epoch {start_epoch}, best_val_loss: {best_val_loss:.4f} ---")
+    else:
+        print("--- No student checkpoint found, starting distillation from scratch. ---")
+
+    print("=" * 60)
+    print(" " * 15 + "Starting Student Distillation")
+    print("=" * 60)
+    print(f"{'--- Student Architecture ---':^60}")
+    print(f"{'D_MODEL':<25}: {D_MODEL}")
+    print(f"{'NUM_LAYERS':<25}: {NUM_LAYERS}")
+    print(f"{'NUM_HEADS':<25}: {NUM_HEADS}")
+    print(f"{'NUM_GROUPS (for GQA)':<25}: {NUM_GROUPS}")
+    print(f"\n{'--- Distillation Params ---':^60}")
+    print(f"{'KD_ALPHA (Distill %)':<25}: {KD_ALPHA}")
+    print(f"{'TEMPERATURE':<25}: {TEMPERATURE}")
+    print(f"{'HARD_LOSS_ALPHA (CE %)':<25}: {INITIAL_ALPHA} -> {FINAL_ALPHA}")
+    print("=" * 60 + "\n")
+
+    start_time = time.time()
+
+    for epoch in range(start_epoch, EPOCHS):
+        if epoch < ALPHA_DECAY_EPOCHS:
+            current_alpha = INITIAL_ALPHA - (INITIAL_ALPHA - FINAL_ALPHA) * (epoch / ALPHA_DECAY_EPOCHS)
+        else:
+            current_alpha = FINAL_ALPHA
+
+        train_loss, hard_loss, kd_loss, train_acc = train_distill(
+            model, teacher_model, train_loader, optimizer, device, scaler,
+            class_weights_tensor, alpha=current_alpha, kd_alpha=KD_ALPHA, temperature=TEMPERATURE
+        )
+
+        val_loss, val_acc = test(model, val_loader, device, scaler,
+                                 weight_tensor=class_weights_tensor, alpha=current_alpha)
+
+        elapsed_time = time.time() - start_time
+        scheduler.step()
+
+        print(
+            f"/**** Epoch {epoch + 1}, LR: {optimizer.param_groups[0]['lr']:.2e}, Alpha(Hard): {current_alpha:.3f} ****/")
+        print(f"Train Loss: {train_loss:.4f} (Hard: {hard_loss:.4f}, KD: {kd_loss:.4f})")
+        print(f"Train Acc: {train_acc:.4f}, Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}")
+        print(f"Time elapsed: {elapsed_time:.2f} seconds")
+
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            counter = 0
+            torch.save(model.state_dict(), best_model_path)
+            print(f"New best val_loss: {best_val_loss:.4f}, saved {best_model_path}")
+        else:
+            counter += 1
+            if counter >= PATIENCE:
+                print("Early stopping")
+                break
+
+        if epoch % 5 == 0:
+            torch.save({
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'scheduler_state_dict': scheduler.state_dict(),
+                'scaler_state_dict': scaler.state_dict(),
+                'best_val_loss': best_val_loss,
+                'label_encoder': label_encoder
+            }, checkpoint_path)
+            print(f"已保存学生模型检查点到 {checkpoint_path}")
+
+    print("Student distillation training complete.")
+    return model, label_encoder
