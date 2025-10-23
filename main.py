@@ -100,7 +100,32 @@ def train_transformer_model(mode='teacher', num_datasets=70):
             print("请先运行 'teacher' 模式进行训练。")
             return
 
-        teacher_model.load_state_dict(torch.load(teacher_checkpoint_path))
+        # ------------------- [新的修复代码块] -------------------
+        # 加载 state_dict 到 CPU
+        state_dict = torch.load(teacher_checkpoint_path, map_location='cpu')
+        
+        # 自动检测并清理 '_orig_mod.' 前缀
+        # 检查是否有任何键以此前缀开头
+        if any(k.startswith('_orig_mod.') for k in state_dict.keys()):
+            print("[main.py] 检测到 'torch.compile' 权重，正在清理 '_orig_mod.' 前缀...")
+            # 使用字典推导式 (dictionary comprehension) 来创建新的 state_dict
+            # 它会遍历所有键值对，如果键以 '_orig_mod.' 开头，就去掉这个前缀 (长度为 10)
+            new_state_dict = {k[len('_orig_mod.'):]: v for k, v in state_dict.items() if k.startswith('_orig_mod.')}
+        else:
+            print("[main.py] 未检测到 'torch.compile' 权重，正常加载。")
+            new_state_dict = state_dict # 保持原样
+
+        # 加载清理后的 state_dict
+        # 我们使用 strict=True，因为 best_transformer_model.pth 应该只包含模型权重
+        try:
+            teacher_model.load_state_dict(new_state_dict, strict=True)
+        except RuntimeError as e:
+            # 如果因为某种原因 (例如文件损坏或误用) 导致严格加载失败，我们尝试非严格加载
+            print(f"严格加载 (strict=True) 失败: {e}")
+            print("尝试非严格加载 (strict=False)...")
+            teacher_model.load_state_dict(new_state_dict, strict=False)
+        # ------------------- [修复代码块结束] -------------------
+
         print("[main.py] 教师模型加载成功。")
 
         # 3. 启动学生模型的蒸馏训练 将 *教师模型实例* 和数据一起传递给蒸馏函数
