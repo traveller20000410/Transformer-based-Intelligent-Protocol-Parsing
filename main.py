@@ -1,12 +1,22 @@
 import i2c_data_gen_one_frame as I2C_data_generator;            #import I2C_data_generator_mutliframe;
-import torch;   import os;                                      #import RS232_data_generator;
-#import common8b10b_data_generator;                             #import matplotlib.pyplot as plt
+import torch;   import os;                                      import json;
 from scipy import stats                                         # from transformer_MLA import train_model as MLA_train_model,predict_protocol,load_model
-from transformer_GQA_Teacher import train_model as GQA_train_model,predict_protocol,load_model
-# from transformer_GQA_Student import trained_student_model
 import numpy as np;                                             from universal_function import save_downsampled_csv
 import pandas as pd;                                            from scipy import stats
 from joblib import load;                                        from scipy.signal import resample
+
+# --- 导入教师和学生模型 ---
+# 教师模型用于加载预训练权重
+from transformer_GQA_Teacher import TransformerModel as TeacherTransformerModel
+from transformer_GQA_Teacher import D_MODEL as TEACHER_D_MODEL
+from transformer_GQA_Teacher import NUM_HEADS as TEACHER_NUM_HEADS
+from transformer_GQA_Teacher import NUM_LAYERS as TEACHER_NUM_LAYERS
+from transformer_GQA_Teacher import DROPOUT as TEACHER_DROPOUT
+from transformer_GQA_Teacher import MAX_LENGTH as TEACHER_MAX_LENGTH
+from transformer_GQA_Teacher import NUM_GROUPS as TEACHER_NUM_GROUPS
+from transformer_GQA_Teacher import train_model as GQA_train_model # 导入教师模型的 *训练* 函数
+# 导入学生模型的 *蒸馏训练* 函数
+from transformer_GQA_Student import train_model_distill as GQA_train_model_distill
 
 #定义
 RESUME_TRAINING = False
@@ -17,12 +27,6 @@ def generate_protocols_dataset(num_datasets=None):
     # #生成I2C协议数据与标签
     gen = I2C_data_generator.RealisticI2CSignalGenerator(config=I2C_data_generator.DEFAULT_I2C_CONFIG)
     protocols_dataset0, protocol_labels0,_,channel_maps = gen.generate_i2c_datasets(num_datasets)
-    #生成RS232协议数据与标签
-    # gen = RS232_data_generator.RealisticRS232SignalGenerator()
-    # protocols_dataset1, protocol_labels1 = gen.generate_rs232_datasets(num_datasets)
-    # #生成common8b10b协议数据与标签
-    # gen = common8b10b_data_generator.RealisticCommon8b10bSignalGenerator()
-    # protocols_dataset2, protocol_labels2 = gen.generate_common8b10b_datasets(num_datasets)
     # 合并数据和标签
     # protocols_dataset = protocols_dataset0 + protocols_dataset1+protocols_dataset2
     # protocol_labels = protocol_labels0 + protocol_labels1+protocol_labels2
@@ -44,7 +48,7 @@ def generate_protocols_dataset(num_datasets=None):
     return protocols_dataset0, protocol_labels0,channel_maps
 
 
-def train_transformer_model(num_datasets=None):
+def train_transformer_model(mode='teacher', num_datasets=70):
     if RESUME_TRAINING and os.path.exists(DATA_CACHE_PATH):
         print("[main.py] 加载之前缓存的数据...")
         cached = np.load(DATA_CACHE_PATH, allow_pickle=False)
@@ -54,18 +58,53 @@ def train_transformer_model(num_datasets=None):
         print("[main.py] 重新生成并处理数据...")
         # 生成协议数据与标签
         protocols_dataset, protocol_labels,channel_maps = generate_protocols_dataset(num_datasets)
-        print(f"[main.py] Shape after generation: {protocols_dataset.shape}")  # 应该输出 [64, 10000, 2]
+        print(f"[main.py] Shape after generation: {protocols_dataset.shape}")
         #预处理
         processed_dataset,processed_labels=preprocess_dataset(protocols_dataset, protocol_labels)
-        print(f"[main.py] Shape after downsampling: {processed_dataset.shape}")  # 应该输出 [64, 1250, 2]
+        print(f"[main.py] Shape after downsampling: {processed_dataset.shape}")
+
+        # 导出给 C# ONNX 推理使用：每条样本一个 (L,4) float32 .bin
+        save_for_csharp_onnx(processed_dataset,out_dir="csharp_onnx_data",prefix="i2c",norm_meta={"type": "minmax", "per_channel": True, "range": [0.0, 1.0]})
         np.savez(DATA_CACHE_PATH, data=processed_dataset, labels=processed_labels)
 
         # 3) 导出下采样后的 SCL/SDA
-        #export_scl_sda_from_4ch(data_4ch=processed_dataset,labels=processed_labels,maps=channel_maps,base_dir="downsampled_scl_sda",sampling_rate=processed_dataset.shape[1])
+        # export_scl_sda_from_4ch(data_4ch=processed_dataset,labels=processed_labels,maps=channel_maps,base_dir="downsampled_scl_sda",sampling_rate=processed_dataset.shape[1])
 
-    #启动训练
-    # MLA_train_model(processed_dataset, processed_labels)
-    GQA_train_model(processed_dataset, processed_labels)
+    # --- 流程控制 ---
+    if mode == 'teacher':
+        print("\n" + "#" * 30)
+        print("###   开始训练【教师】模型   ###")
+        print("#" * 30 + "\n")
+        # 启动教师模型的训练
+        GQA_train_model(processed_dataset, processed_labels)
+
+    elif mode == 'student':
+        print("\n" + "#" * 30)
+        print("###  开始蒸馏【学生】模型  ###")
+        print("#" * 30 + "\n")
+
+        # 1. 定义教师模型架构
+        print("[main.py] 正在加载教师模型...")
+        # (确保这里的 16 是您教师模型的 output_dim)
+        output_dim = len(I2C_data_generator.LABEL_MAP)  # 应该是 16
+
+        teacher_model = TeacherTransformerModel(
+            output_dim, TEACHER_MAX_LENGTH, TEACHER_D_MODEL, TEACHER_NUM_HEADS,
+            TEACHER_NUM_LAYERS, TEACHER_DROPOUT, TEACHER_NUM_GROUPS
+        )
+
+        # 2. 加载训练好的教师模型权重
+        teacher_checkpoint_path = 'best_transformer_model.pth'  # 假设这是您最好的教师模型
+        if not os.path.exists(teacher_checkpoint_path):
+            print(f"[ERROR] 教师模型权重 {teacher_checkpoint_path} 不存在!")
+            print("请先运行 'teacher' 模式进行训练。")
+            return
+
+        teacher_model.load_state_dict(torch.load(teacher_checkpoint_path))
+        print("[main.py] 教师模型加载成功。")
+
+        # 3. 启动学生模型的蒸馏训练 将 *教师模型实例* 和数据一起传递给蒸馏函数
+        GQA_train_model_distill(teacher_model, processed_dataset, processed_labels)
 
 
 # def export_downsampled_waveforms(down_data, down_labels, base_dir="downsampled_i2c", sampling_rate=None):
@@ -126,9 +165,39 @@ def export_scl_sda_from_4ch(data_4ch: np.ndarray, labels: np.ndarray, maps: list
         df.to_csv(path, index=False)
     print(f">>> 已导出 {N} 条仅含 SCL/SDA 的 CSV 到：{base_dir}/")
 
+def save_for_csharp_onnx(data_4ch_norm: np.ndarray,out_dir: str = "csharp_onnx_data",prefix: str = "i2c",norm_meta: dict | None = None):
+    os.makedirs(out_dir, exist_ok=True)
+    N, L, C = data_4ch_norm.shape
+    assert C == 4, f"expect 4 channels, got {C}"
 
-def preprocess_dataset(dataset, labels, target_length=1250, normalize=True, v_low=0.0, v_high=3.3):
+    class_map = {int(v): k for k, v in I2C_data_generator.LABEL_MAP.items()}  # :contentReference[oaicite:3]{index=3}
 
+    manifest = {
+        "version": 1,
+        "num_samples": int(N),
+        "length": int(L),
+        "num_channels": int(C),
+        "dtype": "float32",
+        "layout": "LxC row-major",
+        "class_map": class_map,
+        "norm": norm_meta or {"type":"minmax","per_channel":True,"range":[0.0,1.0]},
+        "files": []
+    }
+
+    for i in range(N):
+        x = np.ascontiguousarray(data_4ch_norm[i].astype(np.float32))  # (L,4)
+        x_path = os.path.join(out_dir, f"{prefix}_{i:04d}.bin")
+        x.tofile(x_path)
+        manifest["files"].append({"x": os.path.basename(x_path), "shape": [int(L), int(C)]})
+
+    with open(os.path.join(out_dir, "manifest.json"), "w", encoding="utf-8") as f:
+        json.dump(manifest, f, ensure_ascii=False, indent=2)
+
+    print(f">>> Saved {N} samples to '{out_dir}' as float32 [0,1].")
+
+
+def preprocess_dataset(dataset, labels, target_length=1250, normalize=True,
+                       v_low=0.0, v_high=3.3):
     original_data = dataset
     original_labels = labels
     N, L, C = original_data.shape  # 例如 C=4
@@ -152,7 +221,6 @@ def preprocess_dataset(dataset, labels, target_length=1250, normalize=True, v_lo
         import numpy as np
         v_low_arr  = np.array(v_low,  dtype=np.float32).reshape(1, 1, -1) if np.ndim(v_low)  else np.full((1,1,C), v_low,  dtype=np.float32)
         v_high_arr = np.array(v_high, dtype=np.float32).reshape(1, 1, -1) if np.ndim(v_high) else np.full((1,1,C), v_high, dtype=np.float32)
-
         # 防止除零
         denom = (v_high_arr - v_low_arr)
         denom[denom == 0] = 1e-6
@@ -163,35 +231,24 @@ def preprocess_dataset(dataset, labels, target_length=1250, normalize=True, v_lo
     return resampled_data.astype(np.float32), resampled_labels.astype(np.int64)
 
 
-# def generate_test_protocols_dataset(num_datasets=None):
-#     # 生成测试数据以预测标签
-#     gen = I2C_data_generator.RealisticI2CSignalGenerator(sampling_rate=1000000)
-#     protocols_dataset1, protocol_labels0 = gen.generate_i2c_datasets(num_datasets=10)
-#     gen = common8b10b_data_generator.RealisticCommon8b10bSignalGenerator()
-#     protocols_dataset2, protocol_labels3 = gen.generate_common8b10b_datasets(num_datasets=10)
-#     gen=RS232_data_generator.RealisticRS232SignalGenerator(sampling_rate=1000000)
-#     protocols_dataset3, protocol_labels2 = gen.generate_rs232_datasets(num_datasets=10)
-#     # 合并数据
-#     protocols_dataset_fortest = protocols_dataset1 + protocols_dataset2+protocols_dataset3
-#     return protocols_dataset_fortest
+# def test_model(flag=None,num_datasets=None):
+#     input_dim = 21
+#     output_dim = 5  # 假设输出维度为 5，根据你的具体情况修改
+#     d_model = 64
+#     num_heads = 4
+#     num_layers = 4
+#     dropout = 0.2
+#     num_groups = 2
+#     max_length = 1024
+#     # 加载模型
+#     model = load_model(input_dim, output_dim, max_length, d_model, num_heads, num_layers, dropout)
+#     label_encoder = load('label_encoder.joblib')
+#     # 调用测试函数
+#     predicted_protocol,original_protocol_label = test_with_sequence(model, label_encoder)
+#     original_protocol_label = original_protocol_label[0].tolist()
+#     # test_protocol_plt(original_protocol_label,predicted_protocol)
+#     print("Predicted protocol:", predicted_protocol)
 
-def test_model(flag=None,num_datasets=None):
-    input_dim = 21
-    output_dim = 5  # 假设输出维度为 5，根据你的具体情况修改
-    d_model = 64
-    num_heads = 4
-    num_layers = 4
-    dropout = 0.2
-    num_groups = 2
-    max_length = 1024
-    # 加载模型
-    model = load_model(input_dim, output_dim, max_length, d_model, num_heads, num_layers, dropout)
-    label_encoder = load('label_encoder.joblib')
-    # 调用测试函数
-    predicted_protocol,original_protocol_label = test_with_sequence(model, label_encoder)
-    original_protocol_label = original_protocol_label[0].tolist()
-    # test_protocol_plt(original_protocol_label,predicted_protocol)
-    print("Predicted protocol:", predicted_protocol)
     # model=load_model(input_dim, output_dim, max_length, d_model, num_heads, num_layers, dropout)
     # # print(model)
     # # 生成测试数据以预测标签
@@ -212,63 +269,24 @@ def test_model(flag=None,num_datasets=None):
     # for i, protocol in enumerate(predicted_protocols):
     #     print(f"Test data {i + 1}: Predicted protocol: {protocol}")
 
+# def test_with_sequence(model, label_encoder, sequence_length=1024):
+#     device = next(model.parameters()).device  # 获取模型所在的设备
+#     # 生成一个长度为 1024 的随机数据序列，假设数据为整数
+#     data,protocol_label=generate_protocols_dataset(num_datasets=1)
+#     processed_dataset, protocol_label = preprocess_dataset(data, protocol_label)
+#     model.eval()  # 将模型设置为评估模式
+#     with torch.no_grad():
+#         emissions, mask = model(processed_dataset)
+#         predicted = model.crf.decode(emissions, mask=mask)[0]
+#     return predicted,protocol_label
 
-#导入外部数据
-# def import_tek_data():
-#     # 读取CSV文件
-#     df1 = pd.read_csv('8b10b_data_ALL.csv', header=None)
-#     all_data1 = df1.iloc[:, 0].values
-#     data_list1 = [all_data1[i * 5000:(i + 1) * 5000] for i in range(len(all_data1) // 5000)]
-#
-#     df2 = pd.read_csv('RS232_data_ALL.csv', header=None)
-#     all_data2 = df2.iloc[:, 0].values
-#     data_list2 = [all_data2[i * 5000:(i + 1) * 5000] for i in range(len(all_data2) // 5000)]
-#
-#     data_list=data_list1+data_list2
-#     # 对每个子数组进行归一化处理
-#     normalized_data_list = []
-#     for sub_array in data_list:
-#         normalized_sub_array = normalize_data(sub_array)
-#         normalized_data_list.append(normalized_sub_array)
-#     return normalized_data_list
-
-def test_with_sequence(model, label_encoder, sequence_length=1024):
-    device = next(model.parameters()).device  # 获取模型所在的设备
-    # 生成一个长度为 1024 的随机数据序列，假设数据为整数
-    data,protocol_label=generate_protocols_dataset(num_datasets=1)
-    processed_dataset, protocol_label = preprocess_dataset(data, protocol_label)
-    model.eval()  # 将模型设置为评估模式
-    with torch.no_grad():
-        emissions, mask = model(processed_dataset)
-        predicted = model.crf.decode(emissions, mask=mask)[0]
-    return predicted,protocol_label
-
-# def test_protocol_plt(original_protocol_label,predicted_protocol):
-#     if len(original_protocol_label) != len(predicted_protocol):
-#         raise ValueError("original_protocol_label and predicted_protocol must have the same length.")
-#     # 创建一个包含两个子图的图形，共享x轴
-#     fig, (ax1, ax2) = plt.subplots(2, 1, sharex=True, figsize=(10, 8))
-#
-#     # 绘制第一列数据（original_protocol_label）的图形，在上方的子图
-#     ax1.plot(original_protocol_label, label='Original Protocol Label', color='orange')
-#     ax1.set_xlabel('Index')
-#     ax1.set_ylabel('Original Label Value')
-#     ax1.set_title('Predicted Protocol vs Original Protocol Label')
-#     ax1.legend()
-#
-#     # 绘制第二列数据（predicted_protocol）的图形，在下方的子图
-#     ax2.plot(predicted_protocol, label='Predicted Protocol')
-#     ax2.set_xlabel('Index')
-#     ax2.set_ylabel('Predicted Label Value')
-#     ax2.legend()
-#     # 调整子图之间的间距等布局设置
-#     plt.tight_layout()
-#     # 显示图形
-#     plt.show()
 
 def main():
-    train_transformer_model(num_datasets=1000)
-    # test_model(flag="te",num_datasets=None)
+    # 步骤 1: 训练教师模型
+    #train_transformer_model(mode='teacher', num_datasets=1000)
+
+    # 步骤 2: 训练好教师后，注释掉上面一行，运行下面一行来蒸馏学生模型
+    train_transformer_model(mode='student', num_datasets=1000)
 
 if __name__ == "__main__":
     main()
