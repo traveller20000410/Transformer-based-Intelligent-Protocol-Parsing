@@ -397,7 +397,7 @@ def train_model_distill(teacher_model, protocols_dataset, protocol_labels):
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=1e-5)
     scaler = torch.amp.GradScaler('cuda')
-    scheduler = torch.optim.CosineAnnealingLR(optimizer, T_max=EPOCHS)
+    scheduler = CosineAnnealingLR(optimizer, T_max=EPOCHS)
 
     checkpoint_path = 'student_checkpoint.pth'
     best_model_path = 'best_student_model.pth'
