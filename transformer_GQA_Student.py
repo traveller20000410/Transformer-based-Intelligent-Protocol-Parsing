@@ -18,20 +18,14 @@ from torch.cuda.amp import autocast, GradScaler;
 from torch.optim.lr_scheduler import StepLR, MultiStepLR, ReduceLROnPlateau, CosineAnnealingLR
 
 # --- 学生模型的超参数 ---
-# 架构参数被显著减小
-BATCH_SIZE = 256;  # 保持与教师一致或适当调大
-EPOCHS = 500  # 蒸馏可能需要更多/更少时间，取决于收敛情况
-LEARNING_RATE = 0.0003;  # 学生模型学习率可以适当调高
-D_MODEL = 64;  # (教师是 256)
-NUM_HEADS = 8;  # (教师是 8)
-NUM_LAYERS = 4;  # (教师是 12)
-DROPOUT = 0.1;
-MAX_LENGTH = 1250
-NUM_GROUPS = 8;  # (教师是 2)，这里设为8，使其变为 MHA
-PATIENCE = 30;  # 蒸馏训练可能需要更多耐心
-INITIAL_ALPHA = 0.5;  # "硬" 损失 (CE+CRF) 的权重
-FINAL_ALPHA = 0.1
-ALPHA_DECAY_EPOCHS = EPOCHS * 0.7
+# 定义超参数，包括批量大小、训练轮次、学习率等
+BATCH_SIZE =        256;                        EPOCHS =        500   # 蒸馏可能需要更多/更少时间，取决于收敛情况
+LEARNING_RATE =     0.0002;                     D_MODEL =       128
+NUM_HEADS =         8;                          NUM_LAYERS =    8
+DROPOUT =           0.1;                        MAX_LENGTH =    1250
+NUM_GROUPS =        2 ;                         PATIENCE=       30;   # 蒸馏训练可能需要更多耐心
+INITIAL_ALPHA =     0.5;                        FINAL_ALPHA =   0.1
+ALPHA_DECAY_EPOCHS = EPOCHS * 0.7               #SCHEDULER_PATIENCE=15;
 
 # --- 知识蒸馏超参数 ---
 KD_ALPHA = 0.7;  # 知识蒸馏损失的权重 (70% 损失来自蒸馏)
