@@ -17,7 +17,7 @@ def _fmha(q, k, v, p, bias, training: bool):
     )
     
 # 定义超参数，包括批量大小、训练轮次、学习率等
-BATCH_SIZE =        256;                        EPOCHS =        500
+BATCH_SIZE =        256;                        EPOCHS =        700
 LEARNING_RATE =     0.0001;                     D_MODEL =       64
 NUM_HEADS =         4;                          NUM_LAYERS =    6
 DROPOUT =           0.1;                        MAX_LENGTH =    1250
