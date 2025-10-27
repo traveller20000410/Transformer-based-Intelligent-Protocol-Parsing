@@ -21,7 +21,7 @@ BATCH_SIZE =        256;                        EPOCHS =        800
 LEARNING_RATE =     0.0003;                     D_MODEL =       32
 NUM_HEADS =         4;                          NUM_LAYERS =    6
 DROPOUT =           0.1;                        MAX_LENGTH =    1250
-NUM_GROUPS =        2 ;                         PATIENCE=       15;
+NUM_GROUPS =        2 ;                         PATIENCE=       20;
 INITIAL_ALPHA =     1.0;                        FINAL_ALPHA =   0.2
 ALPHA_DECAY_EPOCHS = EPOCHS * 0.7               #SCHEDULER_PATIENCE=15;
 
