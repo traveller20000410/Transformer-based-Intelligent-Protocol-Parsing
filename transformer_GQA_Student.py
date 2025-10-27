@@ -20,15 +20,15 @@ from torch.optim.lr_scheduler import StepLR, MultiStepLR, ReduceLROnPlateau, Cos
 # --- 学生模型的超参数 ---
 # 定义超参数，包括批量大小、训练轮次、学习率等
 BATCH_SIZE =        256;                        EPOCHS =        500   # 蒸馏可能需要更多/更少时间，取决于收敛情况
-LEARNING_RATE =     0.0002;                     D_MODEL =       96
-NUM_HEADS =         8;                          NUM_LAYERS =    8
+LEARNING_RATE =     0.0002;                     D_MODEL =       32
+NUM_HEADS =         4;                          NUM_LAYERS =    4
 DROPOUT =           0.1;                        MAX_LENGTH =    1250
 NUM_GROUPS =        2 ;                         PATIENCE=       20;   # 蒸馏训练可能需要更多耐心
 INITIAL_ALPHA =     0.5;                        FINAL_ALPHA =   0.1
 ALPHA_DECAY_EPOCHS = EPOCHS * 0.7               #SCHEDULER_PATIENCE=15;
 
 # --- 知识蒸馏超参数 ---
-KD_ALPHA = 0.7;  # 知识蒸馏损失的权重 (70% 损失来自蒸馏)
+KD_ALPHA = 0.5;  # 知识蒸馏损失的权重 (70% 损失来自蒸馏)
 TEMPERATURE = 2.0;  # 蒸馏温度，用于平滑教师的输出
 
 
