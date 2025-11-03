@@ -146,18 +146,25 @@ class GroupedQueryAttention(nn.Module):
         out = out.transpose(1, 2).reshape(B, L, self.d_model)  # (B, H, L, Dh) -> (B, L, H, Dh) -> (B, L, D_MODEL)
         return self.W_o(out)
 
+class RMSNormQwen3(nn.Module):
+    def __init__(self, dim, eps=1e-8):
+        super().__init__()
+        self.weight = nn.Parameter(torch.zeros(dim))  # 初值0，对应1+γ=1
+        self.eps = eps
+    def forward(self, x):
+        norm = x.norm(2, dim=-1, keepdim=True) / (x.shape[-1] ** 0.5)
+        return x / (norm + self.eps) * (1.0 + self.weight)
 
 class TransformerEncoderLayer(nn.Module):
     """
     学生版的 EncoderLayer，移除了梯度检查点。
     """
-
     def __init__(self, d_model, num_heads, dropout, num_groups):
         super(TransformerEncoderLayer, self).__init__()
         self.attention = GroupedQueryAttention(d_model, num_heads, num_groups, dropout=dropout)
         self.ffn = FeedForward(d_model, dropout=dropout)
-        self.norm1 = nn.LayerNorm(d_model)
-        self.norm2 = nn.LayerNorm(d_model)
+        self.norm1 = RMSNormQwen3(d_model)
+        self.norm2 = RMSNormQwen3(d_model)
 
     def forward(self, x, mask=None):
         # **核心修改**: 移除 checkpoint(custom_forward, ...)
