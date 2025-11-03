@@ -18,7 +18,7 @@ def _fmha(q, k, v, p, bias, training: bool):
     
 # 定义超参数，包括批量大小、训练轮次、学习率等
 BATCH_SIZE =        256;                        EPOCHS =        600
-LEARNING_RATE =     0.0004;                     D_MODEL =       64
+LEARNING_RATE =     0.0004;                     D_MODEL =       32
 NUM_HEADS =         4;                          NUM_LAYERS =    4
 DROPOUT =           0.1;                        MAX_LENGTH =    1250
 NUM_GROUPS =        2 ;                         PATIENCE=       20;
@@ -127,11 +127,12 @@ class FeedForward(nn.Module):
             super(FeedForward, self).__init__()
             d_ff = d_model * d_ff_multiplier  #transformer里一般FFN取D_MODEL的4倍
             self.linear1 = nn.Linear(d_model, d_ff)
+            self.activation = FastGELU()
             self.linear2 = nn.Linear(d_ff, d_model)
             self.dropout = nn.Dropout(dropout)
 
         def forward(self, x):
-            x = F.gelu(self.linear1(x))
+            x = self.activation(self.linear1(x))
             x = self.dropout(x)
             x = self.linear2(x)
             return x
@@ -145,7 +146,14 @@ class RMSNormQwen3(nn.Module):
     def forward(self, x: torch.Tensor):
         rms = torch.sqrt(torch.mean(x.float() ** 2, dim=-1, keepdim=True) + self.eps)
         return (x / rms * self.weight).type_as(x)  # ✅ 直接乘weight
+        
+class FastGELU(nn.Module):
+    def __init__(self):
+        super().__init__()
 
+    def forward(self, x):
+        return 0.5 * x * (1.0 + torch.tanh(x * 0.7978845608 * (1.0 + 0.044715 * x * x)))
+        
 class TransformerEncoderLayer(nn.Module):
     def __init__(self, d_model, num_heads, dropout, num_groups):
         super(TransformerEncoderLayer, self).__init__()
