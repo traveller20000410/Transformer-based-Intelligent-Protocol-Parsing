@@ -137,13 +137,14 @@ class FeedForward(nn.Module):
             return x
 
 class RMSNormQwen3(nn.Module):
-    def __init__(self, dim, eps=1e-8):
+    def __init__(self, dim: int, eps: float = 1e-6):
         super().__init__()
-        self.weight = nn.Parameter(torch.zeros(dim))  # 初值0，对应1+γ=1
+        self.weight = nn.Parameter(torch.ones(dim))  # ✅ 改为ones
         self.eps = eps
-    def forward(self, x):
-        norm = x.norm(2, dim=-1, keepdim=True) / (x.shape[-1] ** 0.5)
-        return x / (norm + self.eps) * (1.0 + self.weight)
+        
+    def forward(self, x: torch.Tensor):
+        rms = torch.sqrt(torch.mean(x.float() ** 2, dim=-1, keepdim=True) + self.eps)
+        return (x / rms * self.weight).type_as(x)  # ✅ 直接乘weight
 
 class TransformerEncoderLayer(nn.Module):
     def __init__(self, d_model, num_heads, dropout, num_groups):
