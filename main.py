@@ -308,7 +308,7 @@ def preprocess_dataset(dataset, labels, target_length=1250, normalize=True,
 
 def main():
     # 步骤 1: 训练教师模型
-    train_transformer_model(mode='teacher', num_datasets=1000)
+    train_transformer_model(mode='teacher', num_datasets=3000)
 
     # 步骤 2: 训练好教师后，注释掉上面一行，运行下面一行来蒸馏学生模型
     # train_transformer_model(mode='student', num_datasets=1000)
