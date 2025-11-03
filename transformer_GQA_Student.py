@@ -78,11 +78,12 @@ class FeedForward(nn.Module):
         super(FeedForward, self).__init__()
         d_ff = d_model * d_ff_multiplier
         self.linear1 = nn.Linear(d_model, d_ff)
+        self.activation = FastGELU()
         self.linear2 = nn.Linear(d_ff, d_model)
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x):
-        x = F.gelu(self.linear1(x))
+        x = self.activation(self.linear1(x))
         x = self.dropout(x)
         x = self.linear2(x)
         return x
@@ -156,6 +157,12 @@ class RMSNormQwen3(nn.Module):
         rms = torch.sqrt(torch.mean(x.float() ** 2, dim=-1, keepdim=True) + self.eps)
         return (x / rms * self.weight).type_as(x)  # ✅ 直接乘weight
 
+class FastGELU(nn.Module):
+    def __init__(self):
+        super().__init__()
+    def forward(self, x):
+        return 0.5 * x * (1.0 + torch.tanh(x * 0.7978845608 * (1.0 + 0.044715 * x * x)))
+        
 class TransformerEncoderLayer(nn.Module):
     """
     学生版的 EncoderLayer，移除了梯度检查点。
