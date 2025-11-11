@@ -137,15 +137,18 @@ class FeedForward(nn.Module):
             x = self.linear2(x)
             return x
 
-class RMSNormQwen3(nn.Module):
+class RMSNorm(nn.Module):
     def __init__(self, dim: int, eps: float = 1e-6):
         super().__init__()
-        self.weight = nn.Parameter(torch.ones(dim))  # ✅ 改为ones
         self.eps = eps
+        self.weight = nn.Parameter(torch.ones(dim))
 
-    def forward(self, x: torch.Tensor):
-        rms = torch.sqrt(torch.mean(x.float() ** 2, dim=-1, keepdim=True) + self.eps)
-        return (x / rms * self.weight).type_as(x)  # ✅ 直接乘weight
+    def _norm(self, x):
+        return x * (x.float().pow(2).mean(-1, keepdim=True) + self.eps).rsqrt()
+
+    def forward(self, x):
+        input_dtype = x.dtype
+        return self._norm(x).to(input_dtype) * self.weight
 
 class FastGELU(nn.Module):
     def __init__(self):
@@ -159,8 +162,8 @@ class TransformerEncoderLayer(nn.Module):
         # 将dropout率传递给Attention层
         self.attention = GroupedQueryAttention(d_model, num_heads, num_groups, dropout=dropout)
         self.ffn = FeedForward(d_model, dropout=dropout)
-        self.norm1 = RMSNormQwen3(d_model)
-        self.norm2 = RMSNormQwen3(d_model)
+        self.norm1 = RMSNorm(d_model)
+        self.norm2 = RMSNorm(d_model)
 
     def forward(self, x, mask=None):
         def custom_forward(x):
