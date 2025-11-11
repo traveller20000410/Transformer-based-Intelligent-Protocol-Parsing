@@ -163,8 +163,8 @@ class TransformerEncoderLayer(nn.Module):
         # 将dropout率传递给Attention层
         self.attention = GroupedQueryAttention(d_model, num_heads, num_groups, dropout=dropout)
         self.ffn = FeedForward(d_model, dropout=dropout)
-        self.norm1 = RMSNormQwen3(d_model)
-        self.norm2 = RMSNormQwen3(d_model)
+        self.norm1 = RMSNorm(d_model)
+        self.norm2 = RMSNorm(d_model)
 
     def forward(self, x, mask=None):
         def custom_forward(x):
