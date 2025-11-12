@@ -9,7 +9,7 @@ from torch.optim.lr_scheduler import StepLR, MultiStepLR, ReduceLROnPlateau, Cos
     
 # 定义超参数，包括批量大小、训练轮次、学习率等
 BATCH_SIZE =        256;                        EPOCHS =        500
-LEARNING_RATE =     0.0004;                     D_MODEL =       64
+LEARNING_RATE =     0.0004;                     D_MODEL =       32
 NUM_HEADS =         4;                          NUM_LAYERS =    4
 DROPOUT =           0.1;                        MAX_LENGTH =    1250
 NUM_GROUPS =        2 ;                         PATIENCE=       20;
