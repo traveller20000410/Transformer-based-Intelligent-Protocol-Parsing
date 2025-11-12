@@ -4,17 +4,8 @@ import numpy as np;     from torch.profiler import profile, ProfilerActivity, sc
 import time;      import math;                                  from transformer_component import weighted_cross_entropy_loss,check_pth_is_accessible,export_to_onnx,loss_result_plt,preprocess_data
 from joblib import load;                                        from torch.utils.checkpoint import checkpoint
 from sklearn.metrics import classification_report;              from sklearn.utils.class_weight import compute_class_weight # 导入一个方便的工具
-from torch.cuda.amp import autocast, GradScaler;                import xformers.ops as xops
-from xformers.ops.fmha import attn_bias;                        import torch._dynamo as dynamo
+from torch.cuda.amp import autocast, GradScaler;                import torch._dynamo as dynamo
 from torch.optim.lr_scheduler import StepLR, MultiStepLR, ReduceLROnPlateau, CosineAnnealingLR
-
-@dynamo.disable
-def _fmha(q, k, v, p, bias, training: bool):
-    return xops.memory_efficient_attention(
-        q, k, v,
-        p=p if training else 0.0,
-        attn_bias=bias
-    )
     
 # 定义超参数，包括批量大小、训练轮次、学习率等
 BATCH_SIZE =        256;                        EPOCHS =        500
@@ -38,6 +29,14 @@ class ProtocolTensorDataset(Dataset):
     def __len__(self):
         return self.data_tensor.size(0)
 
+def create_sliding_window_mask(seq_len, window_size, device):
+    mask = torch.zeros(seq_len, seq_len, dtype=torch.bool, device=device)
+    for i in range(seq_len):
+        start = max(0, i - window_size)
+        end = min(seq_len, i + window_size + 1)
+        mask[i, start:end] = True
+    return mask
+    
 class RotaryEmbedding(nn.Module):
     def __init__(self, dim, max_position_embeddings=MAX_LENGTH):
         super().__init__()
@@ -68,7 +67,8 @@ def apply_rotary_pos_emb(q, k, cos, sin):
 
 class GroupedQueryAttention(nn.Module):
     def __init__(self, d_model, num_heads, num_groups, dropout=DROPOUT,
-                 max_position_embeddings=MAX_LENGTH):
+                 max_position_embeddings=MAX_LENGTH, 
+                 window_size: int = -1): # <--- [新] 添加 window_size 参数
         super().__init__()
         self.d_model = d_model
         self.num_heads = num_heads
@@ -84,8 +84,11 @@ class GroupedQueryAttention(nn.Module):
 
         self.rotary_emb = RotaryEmbedding(self.head_dim, max_position_embeddings)
         self.attn_dropout = dropout
+        
+        self.window_size = window_size # <--- [新] 存储 window_size
+        self.sliding_window_mask = None # <--- [新] 缓存 mask
 
-    def forward(self, query, key, value, mask=None):  # mask参数现在实际上没用了，但保留以兼容接口
+    def forward(self, query, key, value, mask=None):  # mask 参数现在用于 attn_mask
         B, L, _ = query.size()
 
         # 1. 独立投影 Q, K, V
@@ -97,27 +100,33 @@ class GroupedQueryAttention(nn.Module):
         k = k.repeat_interleave(self.num_heads // self.num_groups, dim=2)
         v = v.repeat_interleave(self.num_heads // self.num_groups, dim=2)
 
-        # 3. 应用旋转位置编码 (RoPE)
+        # 3. 调整形状以适应 SDPA (B, H, L, Dh)
         q = q.transpose(1, 2)
         k = k.transpose(1, 2)
+        v = v.transpose(1, 2) # <--- [新] v 也需要 transpose
+
+        # 4. 应用旋转位置编码 (RoPE)
         cos, sin = self.rotary_emb(L)
-        q, k = apply_rotary_pos_emb(q, k, cos, sin)
-        q = q.transpose(1, 2)
-        k = k.transpose(1, 2)
+        q, k = apply_rotary_pos_emb(q, k, cos, sin)  # q, k 仍是 (B, H, L, Dh)
 
-        # v也需要调整形状以匹配xformers的输入
-        v = v.reshape(B, L, self.num_heads, self.head_dim)
+        # 5. [新] 创建局部注意力 掩码 (如果需要)
+        attn_mask = None
+        if self.window_size > 0:
+            # 缓存掩码以提高效率
+            if self.sliding_window_mask is None or self.sliding_window_mask.size(0) != L:
+                self.sliding_window_mask = create_sliding_window_mask(L, self.window_size, query.device)
+            attn_mask = self.sliding_window_mask
 
-        # 4. **核心修复**: 对于无padding的定长序列，我们不需要attn_bias    # 直接调用xformers，它会执行全局注意力
-        out = _fmha(
+        # 6. **核心修改**: 调用 PyTorch 2.0+ 的 scaled_dot_product_attention
+        #    (这可以被 ONNX 导出)
+        out = F.scaled_dot_product_attention(
             q, k, v,
-            self.attn_dropout if self.training else 0.0,
-            None,
-            self.training
+            attn_mask=attn_mask, # <--- [新] 传入掩码
+            dropout_p=self.attn_dropout if self.training else 0.0
         )
 
-        # 5. reshape和输出投影
-        out = out.reshape(B, L, self.d_model)
+        # 7. reshape和输出投影
+        out = out.transpose(1, 2).reshape(B, L, self.d_model) # (B, H, L, Dh) -> (B, L, H, Dh) -> (B, L, D_MODEL)
         return self.W_o(out)
 
 
@@ -157,10 +166,9 @@ class FastGELU(nn.Module):
         return 0.5 * x * (1.0 + torch.tanh(x * 0.7978845608 * (1.0 + 0.044715 * x * x)))
 
 class TransformerEncoderLayer(nn.Module):
-    def __init__(self, d_model, num_heads, dropout, num_groups):
+    def __init__(self, d_model, num_heads, dropout, num_groups, window_size: int = -1):
         super(TransformerEncoderLayer, self).__init__()
-        # 将dropout率传递给Attention层
-        self.attention = GroupedQueryAttention(d_model, num_heads, num_groups, dropout=dropout)
+        self.attention = GroupedQueryAttention(d_model, num_heads, num_groups, dropout=dropout, window_size=window_size)
         self.ffn = FeedForward(d_model, dropout=dropout)
         self.norm1 = RMSNorm(d_model)
         self.norm2 = RMSNorm(d_model)
@@ -182,11 +190,27 @@ class TransformerEncoderLayer(nn.Module):
 class TransformerEncoder(nn.Module):
     def __init__(self, num_layers, d_model, num_heads, dropout, num_groups):
         super(TransformerEncoder, self).__init__()
-        self.layers = nn.ModuleList([TransformerEncoderLayer(d_model, num_heads, dropout, num_groups) for _ in range(num_layers)])
+        
+        self.layers = nn.ModuleList()
+        # 假设 window_size = 64 (这是一个可调的超参数)
+        LOCAL_WINDOW_SIZE = 64 
+
+        for i in range(num_layers):
+            # 策略: 偶数层使用局部注意力，奇数层使用全局注意力
+            is_local_layer = (i % 2 == 0)
+            current_window_size = LOCAL_WINDOW_SIZE if is_local_layer else -1 # -1 代表全局
+
+            print(f"Initializing Encoder Layer {i}: {'LOCAL' if is_local_layer else 'GLOBAL'} attention")
+            layer = TransformerEncoderLayer(
+                d_model=d_model,num_heads=num_heads,dropout=dropout,num_groups=num_groups,window_size=current_window_size 
+            )
+            self.layers.append(layer)
 
     def forward(self, x, mask=None):
-        for layer in self.layers:  x = layer(x, mask)
+        for layer in self.layers:
+            x = layer(x, mask) 
         return x
+        
 
 class TransformerModel(nn.Module):
     def __init__(self, output_dim, max_length, d_model, num_heads, num_layers, dropout, num_groups):
