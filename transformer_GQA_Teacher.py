@@ -283,7 +283,7 @@ def train(model, train_loader, optimizer, device,scaler,scheduler,weight_tensor=
             emissions,mask = model(data)  # (batch_size, seq_len, num_classes)
             #计算组合损失
             loss_crf = -model.crf(emissions, target, mask=mask)
-            emissions_flat = emissions.view(-1, emissions.shape[-1])
+            emissions_flat = emissions.reshape(-1, emissions.shape[-1])
             target_flat = target.view(-1)
             active_loss_mask = mask.view(-1) == 1
             active_emissions = emissions_flat[active_loss_mask]
