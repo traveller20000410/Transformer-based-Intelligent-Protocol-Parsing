@@ -192,66 +192,28 @@ class TransformerEncoder(nn.Module):
 class TransformerModel(nn.Module):
     def __init__(self, output_dim, max_length, d_model, num_heads, num_layers, dropout, num_groups):
         super(TransformerModel, self).__init__()
-        
-        # --- [新增] 1. MaxPool 前端 ---
-        # 作用: 将输入长度从 1250 压缩到 625
-        # kernel_size=2, stride=2 实现 2x 下采样
-        self.frontend_pool = nn.MaxPool1d(kernel_size=2, stride=2)
-        
-        # --- [修改] 2. 输入投影 ---
-        # 注意：现在投影层接收的是降采样后的特征
-        # 4 通道 -> d_model (32)
-        self.input_projection = nn.Linear(4, d_model)
-
-        # 3. Encoder (保持不变)
-        # 注意：它现在处理的是长度为 625 的序列，计算量只有原来的 1/4 到 1/2
+        self.input_projection = nn.Conv1d(
+            in_channels=4, 
+            out_channels=d_model, 
+            kernel_size=3, 
+            stride=2, 
+            padding=1
+         )
         self.encoder = TransformerEncoder(num_layers, d_model, num_heads, dropout, num_groups)
-        
-        # 4. 输出层 (保持不变)
         self.fc = nn.Linear(d_model, output_dim)
-        
-        # --- [新增] 5. 上采样层 ---
-        # 作用: 将长度从 625 恢复到 1250，以便 CRF 输出对应的标签
-        # 使用 "nearest" (最近邻) 插值，最适合配合 MaxPool 的逻辑
         self.upsample = nn.Upsample(scale_factor=2, mode='nearest')
-
-        # 6. CRF (保持不变，它看到的是 1250 长度)
         self.crf = torchcrf.CRF(output_dim, batch_first=True)
 
     def forward(self, x):
-        # x input shape: (Batch, 1250, 4)
-
-        # 1. [变换维度] 适配 MaxPool1d (B, L, C) -> (B, C, L)
-        x = x.permute(0, 2, 1)  # -> (B, 4, 1250)
-
-        # 2. [降采样] MaxPool (L=1250 -> L=625)
-        #    这是大幅降低计算量的关键一步
-        x = self.frontend_pool(x) # -> (B, 4, 625)
-
-        # 3. [变换维度] 换回 Transformer 格式 (B, C, L) -> (B, L, C)
-        x = x.permute(0, 2, 1)    # -> (B, 625, 4)
-
-        # 4. [投影]
-        x_features = self.input_projection(x) # -> (B, 625, d_model)
-
-        # 5. [Encoder 掩码] 生成短掩码 (L=625)
-        #    即使数据是定长的，生成正确的掩码也是好习惯
+        x = x.permute(0, 2, 1) 
+        x_features = self.input_projection(x)
+        x_features = x_features.permute(0, 2, 1)
         mask_short = torch.ones(x_features.shape[0], x_features.shape[1], dtype=torch.bool, device=x.device)
-
-        # 6. [Encoder 计算] (在 L=625 上飞快运行)
         encoded_output = self.encoder(x_features, mask=mask_short) # -> (B, 625, d_model)
-
-        # 7. [输出投影]
         emissions_short = self.fc(encoded_output) # -> (B, 625, output_dim)
-
-        # 8. [上采样] 恢复到 L=1250
-        #    Upsample 需要 (B, C, L) 格式
         emissions_short = emissions_short.permute(0, 2, 1)       # -> (B, output_dim, 625)
         emissions_long = self.upsample(emissions_short)          # -> (B, output_dim, 1250)
         emissions = emissions_long.permute(0, 2, 1)              # -> (B, 1250, output_dim)
-
-        # 9. [输出掩码] 生成长掩码 (L=1250)
-        #    这是为了给 CRF 和 Loss 计算使用的，必须与原始标签长度一致
         mask_long = torch.ones(emissions.shape[0], emissions.shape[1], dtype=torch.bool, device=x.device)
 
         return emissions, mask_long
