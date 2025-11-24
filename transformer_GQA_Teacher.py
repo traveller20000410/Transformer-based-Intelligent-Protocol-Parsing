@@ -201,19 +201,29 @@ class TransformerModel(nn.Module):
          )
         self.encoder = TransformerEncoder(num_layers, d_model, num_heads, dropout, num_groups)
         self.fc = nn.Linear(d_model, output_dim)
-        self.upsample = nn.Upsample(scale_factor=2, mode='nearest')
+        self.upsample = nn.ConvTranspose1d(
+            in_channels=output_dim, 
+            out_channels=output_dim, 
+            kernel_size=2, 
+            stride=2
+        )
         self.crf = torchcrf.CRF(output_dim, batch_first=True)
 
     def forward(self, x):
-        x = x.permute(0, 2, 1) 
-        x_features = self.input_projection(x)
-        x_features = x_features.permute(0, 2, 1)
+
+        x = x.permute(0, 2, 1)              # -> (B, 4, 1250)
+        x_features = self.input_projection(x) # -> (B, 32, 625)  <-- 降采样完成
+        x_features = x_features.permute(0, 2, 1) # -> (B, 625, 32)
+        
         mask_short = torch.ones(x_features.shape[0], x_features.shape[1], dtype=torch.bool, device=x.device)
-        encoded_output = self.encoder(x_features, mask=mask_short) # -> (B, 625, d_model)
-        emissions_short = self.fc(encoded_output) # -> (B, 625, output_dim)
-        emissions_short = emissions_short.permute(0, 2, 1)       # -> (B, output_dim, 625)
-        emissions_long = self.upsample(emissions_short)          # -> (B, output_dim, 1250)
-        emissions = emissions_long.permute(0, 2, 1)              # -> (B, 1250, output_dim)
+        encoded_output = self.encoder(x_features, mask=mask_short) # -> (B, 625, 32)
+
+        emissions_short = self.fc(encoded_output) # -> (B, 625, 16)
+
+        emissions_short = emissions_short.permute(0, 2, 1) # -> (B, 16, 625)
+        emissions_long = self.upsample(emissions_short)    # -> (B, 16, 1250) <-- 恢复长度
+        emissions = emissions_long.permute(0, 2, 1)        # -> (B, 1250, 16)
+        
         mask_long = torch.ones(emissions.shape[0], emissions.shape[1], dtype=torch.bool, device=x.device)
 
         return emissions, mask_long
