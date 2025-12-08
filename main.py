@@ -1,4 +1,4 @@
-import i2c_data_gen_one_frame as I2C_data_generator;            #import I2C_data_generator_mutliframe;
+import i2c_data_gen_one_frame as I2C_data_generator;            import uart as UART_data_generator;
 import torch;   import os;                                      import json;
 from scipy import stats                                         # from transformer_MLA import train_model as MLA_train_model,predict_protocol,load_model
 import numpy as np;                                             from universal_function import save_downsampled_csv
@@ -24,27 +24,13 @@ DATA_CACHE_PATH = "cached_data.npz"
 
 #生成协议数据
 def generate_protocols_dataset(num_datasets=None):
-    # #生成I2C协议数据与标签
-    gen = I2C_data_generator.RealisticI2CSignalGenerator(config=I2C_data_generator.DEFAULT_I2C_CONFIG)
-    protocols_dataset0, protocol_labels0,_,channel_maps = gen.generate_i2c_datasets(num_datasets)
-    # 合并数据和标签
-    # protocols_dataset = protocols_dataset0 + protocols_dataset1+protocols_dataset2
-    # protocol_labels = protocol_labels0 + protocol_labels1+protocol_labels2
+    #生成I2C协议数据与标签
+    #gen = I2C_data_generator.RealisticI2CSignalGenerator(config=I2C_data_generator.DEFAULT_I2C_CONFIG)
+    #protocols_dataset0, protocol_labels0,_,channel_maps = gen.generate_i2c_datasets(num_datasets)
+    # 生成uart协议数据与标签
+    gen = UART_data_generator.RealisticUARTSignalGenerator(config=UART_data_generator.DEFAULT_UART_CONFIG)
+    protocols_dataset0, protocol_labels0, _, channel_maps = gen.generate_uart_datasets(num_datasets)
 
-    # # 创建索引数组
-    # indices = np.arange(len(protocols_dataset))
-    # np.random.shuffle(indices)
-    #
-    # # 创建新的空列表以存储打散后的数据和标签
-    # shuffled_protocols_dataset = [None] * len(protocols_dataset)
-    # shuffled_protocol_labels = [None] * len(protocol_labels)
-
-    # 根据打散后的索引重新排列数据和标签
-    # for i in range(len(protocols_dataset)):
-    #     shuffled_protocols_dataset[i] = protocols_dataset[indices[i]]
-    #     shuffled_protocol_labels[i] = protocol_labels[indices[i]]
-
-    # return shuffled_protocols_dataset, shuffled_protocol_labels
     return protocols_dataset0, protocol_labels0,channel_maps
 
 
@@ -86,7 +72,8 @@ def train_transformer_model(mode='teacher', num_datasets=70):
         # 1. 定义教师模型架构
         print("[main.py] 正在加载教师模型...")
         # (确保这里的 16 是您教师模型的 output_dim)
-        output_dim = len(I2C_data_generator.LABEL_MAP)  # 应该是 16
+        #output_dim = len(I2C_data_generator.LABEL_MAP)  # 应该是 16
+        output_dim = len(UART_data_generator.LABEL_MAP)
 
         teacher_model = TeacherTransformerModel(
             output_dim, TEACHER_MAX_LENGTH, TEACHER_D_MODEL, TEACHER_NUM_HEADS,
