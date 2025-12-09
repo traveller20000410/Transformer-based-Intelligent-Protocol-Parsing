@@ -41,11 +41,11 @@ DEFAULT_UART_CONFIG = {
     'data_bits': 8,
 
     # --- 异常通信概率分布 (模拟现实中的恶劣环境) ---
-    'prob_parity_error': 0.03,  # 5% 的概率发生校验错误
-    'prob_framing_error': 0.03,  # 5% 的概率发生帧错误
-    'prob_glitch': 0.05,  # 10% 的概率出现随机毛刺
-    'prob_break': 0.01,  # 2% 的概率出现 Break 信号
-    'prob_baud_drift': 0.05,  # 10% 的概率出现波特率严重漂移
+    'prob_parity_error': 0.00,  # 5% 的概率发生校验错误
+    'prob_framing_error': 0.00,  # 5% 的概率发生帧错误
+    'prob_glitch': 0.00,  # 10% 的概率出现随机毛刺
+    'prob_break': 0.00,  # 2% 的概率出现 Break 信号
+    'prob_baud_drift': 0.00,  # 10% 的概率出现波特率严重漂移
 
     'idle_before_min': 1, 'idle_before_max': 10,
     'inter_byte_idle_min': 0, 'inter_byte_idle_max': 5,
@@ -87,7 +87,7 @@ class RealisticUARTSignalGenerator:
         self.baud_rate = np.random.choice(br_opts, p=br_probs)
 
         # 2. 选择采样率
-        min_sr = 80 * self.baud_rate
+        min_sr = 40 * self.baud_rate
         valid_srs = [sr for sr in self.config['sampling_rate_options'] if sr >= min_sr]
         if not valid_srs:
             self.sampling_rate = max(self.config['sampling_rate_options'])
@@ -411,3 +411,4 @@ if __name__ == '__main__':
     tx_ch = all_maps[idx][0]
 
     gen.plot_signals(all_data[idx][:, tx_ch], all_labels[idx], title="Generated UART (with Error Injection)")
+
