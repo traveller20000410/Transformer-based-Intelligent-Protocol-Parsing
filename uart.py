@@ -53,16 +53,14 @@ DEFAULT_UART_CONFIG = {
 
     # 波特率选项
     'baud_rate_options': {
-        9600: 1, 
-        #19200: 0.1, 38400: 0.1, 57600: 0.1,
-        #115200: 0.4, 230400: 0.1, 921600: 0.1
+        9600: 0.1, 19200: 0.1, 38400: 0.1, 57600: 0.1,
+        115200: 0.4, 230400: 0.1, 921600: 0.1
     },
 
     # 采样率
     'sampling_rate_options': [
-        #100e3, 200e3, 500e3,
-        1e6,
-        #2e6, 5e6, 10e6, 20e6, 50e6, 100e6
+        100e3, 200e3, 500e3, 1e6,
+        2e6, 5e6, 10e6, 20e6, 50e6, 100e6
     ]
 }
 
@@ -429,6 +427,7 @@ if __name__ == '__main__':
     tx_ch = all_maps[idx][0]
 
     gen.plot_signals(all_data[idx][:, tx_ch], all_labels[idx], title="Generated UART (with Error Injection)")
+
 
 
 
