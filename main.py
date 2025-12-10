@@ -118,38 +118,6 @@ def train_transformer_model(mode='teacher', num_datasets=70):
         # 3. 启动学生模型的蒸馏训练 将 *教师模型实例* 和数据一起传递给蒸馏函数
         GQA_train_model_distill(teacher_model, processed_dataset, processed_labels)
 
-
-# def export_downsampled_waveforms(down_data, down_labels, base_dir="downsampled_i2c", sampling_rate=None):
-#
-#     os.makedirs(base_dir, exist_ok=True)
-#     num_ds, L, _ = down_data.shape
-#     # 如果你想用通用函数直接保存
-#     try:
-#         for i in range(num_ds):
-#             # save_downsampled_csv 会把 (L,2) 的数据写成 CSV
-#             save_downsampled_csv(
-#                 down_data[i],                         # 波形 (SCL/SDA)
-#                 down_labels[i],                       # 对应标签
-#                 os.path.join(base_dir, f"ds_{i:03d}.csv"),
-#                 fs=sampling_rate                     # 可选：传给它采样率
-#             )
-#         print(">>> downsampled CSVs saved via save_downsampled_csv()")
-#         return
-#     except NameError:
-#         # 如果没有这个函数，再走下面的 pandas 路径
-#         pass
-#     # pandas 版本
-#     for i in range(num_ds):
-#         df = pd.DataFrame({
-#             'Time_us': np.arange(L) / sampling_rate * 1e6 if sampling_rate else np.arange(L),
-#             'SCL':      down_data[i, :, 0],
-#             'SDA':      down_data[i, :, 1],
-#             'Label':    down_labels[i]
-#         })
-#         path = os.path.join(base_dir, f"down_i2c_{i:03d}.csv")
-#         df.to_csv(path, index=False)
-#     print(f">>> downsampled CSVs saved under {base_dir}/")
-
 def export_scl_sda_from_4ch(data_4ch: np.ndarray, labels: np.ndarray, maps: list[tuple[int,int]],  base_dir: str = "scl_sda_export",sampling_rate: float = None):
     os.makedirs(base_dir, exist_ok=True)
     N, L, C = data_4ch.shape
@@ -207,90 +175,25 @@ def save_for_csharp_onnx(data_4ch_norm: np.ndarray,out_dir: str = "csharp_onnx_d
 
     print(f">>> Saved {N} samples to '{out_dir}' as float32 [0,1].")
 
+def preprocess_dataset(dataset, labels, target_length=1250, normalize=True,v_low=0.0, v_high=3.3):
+    data_tensor = torch.from_numpy(dataset).float().permute(0, 2, 1)
+    
+    labels_tensor = torch.from_numpy(labels).float().unsqueeze(1)
+    resampled_data = F.interpolate(data_tensor, size=target_length, mode='linear', align_corners=False)
 
-def preprocess_dataset(dataset, labels, target_length=1250, normalize=True,
-                       v_low=0.0, v_high=3.3):
-    original_data = dataset
-    original_labels = labels
-    N, L, C = original_data.shape  # 例如 C=4
+    resampled_labels = F.interpolate(labels_tensor, size=target_length, mode='nearest')
+    resampled_data = resampled_data.permute(0, 2, 1).numpy()
+    resampled_labels = resampled_labels.squeeze(1).long().numpy()
 
-    # 1) 重采样 + 标签重采样
-    if L <= target_length:
-        print(f"Warning: Original length {L} is <= target {target_length}. Skipping resampling.")
-        resampled_data = original_data.astype(np.float32)
-        resampled_labels = original_labels
-    else:
-        from scipy.signal import resample
-        resampled_data = resample(original_data, target_length, axis=1)
-        factor = L // target_length
-        trimmed_labels = original_labels[:, :target_length * factor]
-        reshaped_labels = trimmed_labels.reshape(N, target_length, factor)
-        from scipy import stats
-        resampled_labels, _ = stats.mode(reshaped_labels, axis=2, keepdims=False)
-
-    # 2) 固定范围归一化到 [0,1]（按通道广播）
     if normalize:
-        import numpy as np
-        v_low_arr  = np.array(v_low,  dtype=np.float32).reshape(1, 1, -1) if np.ndim(v_low)  else np.full((1,1,C), v_low,  dtype=np.float32)
-        v_high_arr = np.array(v_high, dtype=np.float32).reshape(1, 1, -1) if np.ndim(v_high) else np.full((1,1,C), v_high, dtype=np.float32)
-        # 防止除零
+        v_low_arr  = np.array(v_low,  dtype=np.float32).reshape(1, 1, -1) if np.ndim(v_low)  else np.full((1,1,dataset.shape[2]), v_low,  dtype=np.float32)
+        v_high_arr = np.array(v_high, dtype=np.float32).reshape(1, 1, -1) if np.ndim(v_high) else np.full((1,1,dataset.shape[2]), v_high, dtype=np.float32)
         denom = (v_high_arr - v_low_arr)
         denom[denom == 0] = 1e-6
-
         resampled_data = (resampled_data - v_low_arr) / denom
         resampled_data = np.clip(resampled_data, 0.0, 1.0)
 
     return resampled_data.astype(np.float32), resampled_labels.astype(np.int64)
-
-
-# def test_model(flag=None,num_datasets=None):
-#     input_dim = 21
-#     output_dim = 5  # 假设输出维度为 5，根据你的具体情况修改
-#     d_model = 64
-#     num_heads = 4
-#     num_layers = 4
-#     dropout = 0.2
-#     num_groups = 2
-#     max_length = 1024
-#     # 加载模型
-#     model = load_model(input_dim, output_dim, max_length, d_model, num_heads, num_layers, dropout)
-#     label_encoder = load('label_encoder.joblib')
-#     # 调用测试函数
-#     predicted_protocol,original_protocol_label = test_with_sequence(model, label_encoder)
-#     original_protocol_label = original_protocol_label[0].tolist()
-#     # test_protocol_plt(original_protocol_label,predicted_protocol)
-#     print("Predicted protocol:", predicted_protocol)
-
-    # model=load_model(input_dim, output_dim, max_length, d_model, num_heads, num_layers, dropout)
-    # # print(model)
-    # # 生成测试数据以预测标签
-    # protocols_dataset_from_generator = generate_test_protocols_dataset()
-    # protocols_dataset_from_Tek = import_tek_data()
-
-    # if flag == "tek":
-    #     protocols_dataset_fortest=protocols_dataset_from_Tek
-    # else:
-    #     protocols_dataset_fortest = protocols_dataset_from_generator
-    # 输入数据以进行预测
-    # predicted_protocols = []
-    # for data in protocols_dataset_fortest:
-    #     protocol = predict_protocol(model, data)
-    #     predicted_protocols.append(protocol)
-    #
-    # # 打印预测的协议名称标签
-    # for i, protocol in enumerate(predicted_protocols):
-    #     print(f"Test data {i + 1}: Predicted protocol: {protocol}")
-
-# def test_with_sequence(model, label_encoder, sequence_length=1024):
-#     device = next(model.parameters()).device  # 获取模型所在的设备
-#     # 生成一个长度为 1024 的随机数据序列，假设数据为整数
-#     data,protocol_label=generate_protocols_dataset(num_datasets=1)
-#     processed_dataset, protocol_label = preprocess_dataset(data, protocol_label)
-#     model.eval()  # 将模型设置为评估模式
-#     with torch.no_grad():
-#         emissions, mask = model(processed_dataset)
-#         predicted = model.crf.decode(emissions, mask=mask)[0]
-#     return predicted,protocol_label
 
 
 def main():
