@@ -1,6 +1,6 @@
 import i2c_data_gen_one_frame as I2C_data_generator;            import uart as UART_data_generator;
 import torch;   import os;                                      import json;
-from scipy import stats；                                       import torch.nn.functional as F
+from scipy import stats;                                        import torch.nn.functional as F
 import numpy as np;                                             from universal_function import save_downsampled_csv
 import pandas as pd;                                            from scipy import stats
 from joblib import load;                                        from scipy.signal import resample
