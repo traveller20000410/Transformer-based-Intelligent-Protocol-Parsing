@@ -89,11 +89,25 @@ class RealisticUARTSignalGenerator:
         self.baud_rate = np.random.choice(br_opts, p=br_probs)
 
         # 2. 选择采样率
-        min_sr = 40 * self.baud_rate
-        valid_srs = [sr for sr in self.config['sampling_rate_options'] if sr >= min_sr]
+        valid_srs = [
+            sr for sr in self.config['sampling_rate_options'] 
+            if min_sr <= sr <= max_sr
+        ]
+
         if not valid_srs:
-            self.sampling_rate = max(self.config['sampling_rate_options'])
+            # 兜底逻辑：如果区间内没有选项
+            # 优先找最接近下限的（保证清晰度），如果没有大的就找最接近上限的
+            all_srs = sorted(self.config['sampling_rate_options'])
+            # 找到第一个大于 min_sr 的
+            candidates = [sr for sr in all_srs if sr >= min_sr]
+            if candidates:
+                self.sampling_rate = candidates[0] # 选最小的满足清晰度的
+            else:
+                self.sampling_rate = all_srs[-1] # 实在没办法，选最大的
+                
+            # print(f"Warning: No optimal sampling rate for baud {self.baud_rate}. Fallback to {self.sampling_rate}")
         else:
+            # 在甜蜜点范围内随机选一个，增加数据多样性
             self.sampling_rate = np.random.choice(valid_srs)
 
         self.samples_per_bit = int(self.sampling_rate / self.baud_rate)
@@ -413,5 +427,6 @@ if __name__ == '__main__':
     tx_ch = all_maps[idx][0]
 
     gen.plot_signals(all_data[idx][:, tx_ch], all_labels[idx], title="Generated UART (with Error Injection)")
+
 
 
