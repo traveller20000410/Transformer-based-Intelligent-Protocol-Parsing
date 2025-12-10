@@ -88,6 +88,8 @@ class RealisticUARTSignalGenerator:
         br_probs = list(self.config['baud_rate_options'].values())
         self.baud_rate = np.random.choice(br_opts, p=br_probs)
 
+        min_sr = 40 * self.baud_rate
+        max_sr = 200 * self.baud_rate
         # 2. 选择采样率
         valid_srs = [
             sr for sr in self.config['sampling_rate_options'] 
@@ -427,6 +429,7 @@ if __name__ == '__main__':
     tx_ch = all_maps[idx][0]
 
     gen.plot_signals(all_data[idx][:, tx_ch], all_labels[idx], title="Generated UART (with Error Injection)")
+
 
 
 
