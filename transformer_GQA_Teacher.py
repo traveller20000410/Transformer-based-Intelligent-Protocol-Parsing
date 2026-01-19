@@ -3,7 +3,7 @@ from torch.utils.data import Dataset, DataLoader;               from sklearn.mod
 import numpy as np;     from torch.profiler import profile, ProfilerActivity, schedule, tensorboard_trace_handler
 import time;      import math;                                  from transformer_component import weighted_cross_entropy_loss,check_pth_is_accessible,export_to_onnx,loss_result_plt,preprocess_data
 from joblib import load;                                        from torch.utils.checkpoint import checkpoint
-from sklearn.metrics import classification_report;              from sklearn.utils.class_weight import compute_class_weight # 导入一个方便的工具
+from sklearn.metrics import classification_report,f1_score;     from sklearn.utils.class_weight import compute_class_weight # 导入一个方便的工具
 from torch.cuda.amp import autocast, GradScaler;                import xformers.ops as xops
 from xformers.ops.fmha import attn_bias;                        import torch._dynamo as dynamo
 from torch.optim.lr_scheduler import StepLR, MultiStepLR, ReduceLROnPlateau, CosineAnnealingLR
@@ -575,20 +575,71 @@ def train_model(protocols_dataset, protocol_labels):
     return model, label_encoder
 
 # 测试函数，计算损失和准确率
-def test(model, test_loader, device, scaler, weight_tensor=None, alpha=0.5):
+# def test(model, test_loader, device, scaler, weight_tensor=None, alpha=0.5):
+#     model.eval()
+#     total_correct_frames = 0 # [新增]
+#     total_frames = 0         # [新增]
+#     running_loss = 0.0
+#     # --- 初始化用于GPU计数的张量 ---
+#     total_correct_gpu = torch.tensor(0.0, device=device)
+#     total_samples_gpu = torch.tensor(0.0, device=device)
+
+#     with torch.no_grad():
+#         for batch_idx, (data, target) in enumerate(test_loader):
+#             data, target = data.to(device), target.to(device)
+#             with torch.amp.autocast('cuda'):
+#                 emissions, mask = model(data)
+
+#                 # --- 为了和训练loss可比，这里也计算组合损失 ---
+#                 loss_crf = -model.crf(emissions, target, mask=mask)
+#                 emissions_flat = emissions.reshape(-1, emissions.shape[-1])
+#                 target_flat = target.reshape(-1)
+#                 active_loss_mask = mask.reshape(-1) == 1
+#                 active_emissions = emissions_flat[active_loss_mask]
+#                 active_targets = target_flat[active_loss_mask]
+
+#                 cross_entropy_func = nn.CrossEntropyLoss(weight=weight_tensor, label_smoothing=0.1) # 0.1是一个常用的值
+#                 loss_ce = cross_entropy_func(active_emissions, active_targets) if weight_tensor is not None else 0
+#                 loss = loss_crf + alpha * loss_ce if weight_tensor is not None else loss_crf
+#                 # --- 结束组合损失计算 ---
+
+#                 running_loss += loss.item()
+#                 #GPU精度计算
+#                 predicted = model.crf.decode(emissions, mask=mask)
+#                 predicted_flat_cpu = [p for sublist in predicted for p in sublist]
+#                 if not predicted_flat_cpu:  continue
+#                 predicted_flat_gpu = torch.tensor(predicted_flat_cpu, device=device)
+#                 # `active_targets` 已经存在于GPU上
+#                 total_correct_gpu += (predicted_flat_gpu == active_targets).sum()
+#                 total_samples_gpu += active_targets.numel()
+
+#     final_accuracy = (total_correct_gpu / total_samples_gpu).item() if total_samples_gpu > 0 else 0.0
+
+#     return running_loss / len(test_loader), final_accuracy
+    def test(model, test_loader, device, scaler, weight_tensor=None, alpha=0.5):
     model.eval()
     running_loss = 0.0
-    # --- 初始化用于GPU计数的张量 ---
+    
+    # --- 原有的 Token 级计数 (保留，用于快速计算 Accuracy) ---
     total_correct_gpu = torch.tensor(0.0, device=device)
     total_samples_gpu = torch.tensor(0.0, device=device)
+
+    # --- [新增] 帧级准确率计数器 ---
+    total_correct_frames = 0
+    total_frames = 0
+
+    # --- [新增] 用于计算 Macro-F1 的列表 (收集全量数据) ---
+    all_preds_cpu = []
+    all_targets_cpu = []
 
     with torch.no_grad():
         for batch_idx, (data, target) in enumerate(test_loader):
             data, target = data.to(device), target.to(device)
+            
             with torch.amp.autocast('cuda'):
+                # 1. 前向传播 & Loss 计算 (保持不变)
                 emissions, mask = model(data)
-
-                # --- 为了和训练loss可比，这里也计算组合损失 ---
+                
                 loss_crf = -model.crf(emissions, target, mask=mask)
                 emissions_flat = emissions.reshape(-1, emissions.shape[-1])
                 target_flat = target.reshape(-1)
@@ -596,24 +647,66 @@ def test(model, test_loader, device, scaler, weight_tensor=None, alpha=0.5):
                 active_emissions = emissions_flat[active_loss_mask]
                 active_targets = target_flat[active_loss_mask]
 
-                cross_entropy_func = nn.CrossEntropyLoss(weight=weight_tensor, label_smoothing=0.1) # 0.1是一个常用的值
+                cross_entropy_func = nn.CrossEntropyLoss(weight=weight_tensor, label_smoothing=0.1)
                 loss_ce = cross_entropy_func(active_emissions, active_targets) if weight_tensor is not None else 0
                 loss = loss_crf + alpha * loss_ce if weight_tensor is not None else loss_crf
-                # --- 结束组合损失计算 ---
-
+                
                 running_loss += loss.item()
-                #GPU精度计算
+
+                # 2. Viterbi 解码 (获取最优路径)
+                # predicted 是一个 list of list (CPU), 长度为 batch_size
+                # 每个子列表的长度 = 该样本的真实有效长度 (mask为True的部分)
                 predicted = model.crf.decode(emissions, mask=mask)
-                predicted_flat_cpu = [p for sublist in predicted for p in sublist]
-                if not predicted_flat_cpu:  continue
-                predicted_flat_gpu = torch.tensor(predicted_flat_cpu, device=device)
-                # `active_targets` 已经存在于GPU上
-                total_correct_gpu += (predicted_flat_gpu == active_targets).sum()
-                total_samples_gpu += active_targets.numel()
 
-    final_accuracy = (total_correct_gpu / total_samples_gpu).item() if total_samples_gpu > 0 else 0.0
+            # --- [修改] 指标计算逻辑 ---
+            
+            # A. GPU Token 准确率计算 (你原来的逻辑，效率高，保留)
+            predicted_flat_cpu = [p for sublist in predicted for p in sublist]
+            if not predicted_flat_cpu: continue
+            
+            # 将预测结果转回 GPU 以便和 active_targets (GPU) 比较
+            predicted_flat_gpu = torch.tensor(predicted_flat_cpu, device=device)
+            total_correct_gpu += (predicted_flat_gpu == active_targets).sum()
+            total_samples_gpu += active_targets.numel()
 
-    return running_loss / len(test_loader), final_accuracy
+            # B. [新增] 帧级准确率 (Frame Accuracy) 计算
+            # target 是 [B, L] 的 Tensor，包含 padding
+            target_cpu = target.cpu().tolist() # 转为 CPU 列表处理
+            mask_cpu = mask.cpu().tolist()     # 转为 CPU 列表处理
+
+            for i, pred_seq in enumerate(predicted):
+                # 获取当前帧的有效长度 (根据 mask)
+                # mask[i] 是布尔列表，sum() 得到 True 的个数
+                valid_len = sum(mask_cpu[i]) 
+                
+                # 获取真实的标签序列 (截断 padding)
+                true_seq = target_cpu[i][:valid_len]
+
+                # 核心判断：整帧序列完全一致才算对
+                if pred_seq == true_seq:
+                    total_correct_frames += 1
+                total_frames += 1
+
+            # C. [新增] 收集数据用于计算 Macro F1
+            # 将当前批次的扁平化结果加入总列表
+            all_preds_cpu.extend(predicted_flat_cpu)
+            # active_targets 是 GPU tensor，需要转回 CPU list
+            all_targets_cpu.extend(active_targets.cpu().tolist())
+
+    # --- 循环结束，汇总计算 ---
+
+    # 1. Token 级准确率
+    final_token_acc = (total_correct_gpu / total_samples_gpu).item() if total_samples_gpu > 0 else 0.0
+
+    # 2. [新增] 帧级准确率
+    final_frame_acc = total_correct_frames / total_frames if total_frames > 0 else 0.0
+
+    # 3. [新增] Macro F1 分数 (解决类别不平衡)
+    # zero_division=0 防止某些类别未出现导致报错
+    final_macro_f1 = f1_score(all_targets_cpu, all_preds_cpu, average='macro', zero_division=0)
+
+    # 返回四个值：Loss, Token-Acc, Frame-Acc, Macro-F1
+    return running_loss / len(test_loader), final_token_acc, final_frame_acc, final_macro_f1
 
 def predict_protocol(model, data):
     device = next(model.parameters()).device
