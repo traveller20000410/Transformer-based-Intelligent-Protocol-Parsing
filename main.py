@@ -191,7 +191,8 @@ def preprocess_dataset(dataset, labels, target_length=1250, normalize=True,v_low
         denom = (v_high_arr - v_low_arr)
         denom[denom == 0] = 1e-6
         resampled_data = (resampled_data - v_low_arr) / denom
-        resampled_data = np.clip(resampled_data, 0.0, 1.0)
+        #resampled_data = np.clip(resampled_data, 0.0, 1.0)
+        resampled_data = np.clip(resampled_data, -0.2, 1.5)
 
     return resampled_data.astype(np.float32), resampled_labels.astype(np.int64)
 
