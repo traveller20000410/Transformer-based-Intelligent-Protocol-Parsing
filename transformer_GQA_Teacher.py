@@ -482,9 +482,9 @@ def train_model(protocols_dataset, protocol_labels):
             # print(f'Epoch {epoch + 1}/{EPOCHS}: Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f}, '
             #       f'Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}, Test Loss: {test_loss:.4f}, Test Acc: {test_acc:.4f}')
             print(f'Epoch {epoch + 1}/{EPOCHS} | '
-                f'Train Loss: {train_loss:.4f} | '
-                f'Val Loss: {val_loss:.4f} (F1: {val_f1:.4f}, FrameAcc: {val_frame_acc:.4f}) | '
-                f'Test Loss: {test_loss:.4f} (F1: {test_f1:.4f})')
+                f'Train: Loss={train_loss:.4f} Acc={train_acc:.4f} | '
+                f'Val: Loss={val_loss:.4f} T_Acc={val_token_acc:.4f} F_Acc={val_frame_acc:.4f} F1={val_f1:.4f} | '
+                f'Test: F_Acc={test_frame_acc:.4f} F1={test_f1:.4f}')
             print(f"Time elapsed: {elapsed_time:.2f} seconds")
 
             # —— 每 20 轮打印一次分类报告 —— #
