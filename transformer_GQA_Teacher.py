@@ -505,7 +505,7 @@ def train_model(protocols_dataset, protocol_labels):
                 # 打印分类报告
                 str_names = label_encoder.classes_.astype(str).tolist()
                 print(f"\n=== Classification Report at Epoch {epoch + 1} ===")
-                print(classification_report(all_trues, all_preds, target_names=str_names,zero_division=0))
+                print(classification_report(all_trues, all_preds, target_names=str_names,zero_division=0,digits=4))
                 print("=== End Report ===\n")
                 model.train()
 
@@ -561,7 +561,7 @@ def train_model(protocols_dataset, protocol_labels):
                 train_predictions.extend(pred_seq[:seq_len])
                 train_true_labels.extend(tgt_seq[:seq_len].cpu().numpy())
     print("Training set classification report:")
-    print(classification_report(train_true_labels, train_predictions,target_names=label_encoder.classes_.astype(str).tolist(),zero_division=0))
+    print(classification_report(train_true_labels, train_predictions,target_names=label_encoder.classes_.astype(str).tolist(),zero_division=0,digits=4))
     # 在测试集上评估
     test_predictions = [];              test_true_labels = []
     with torch.no_grad():
@@ -575,53 +575,12 @@ def train_model(protocols_dataset, protocol_labels):
                 test_true_labels.extend(tgt_seq[:seq_len].cpu().numpy())
     print("Test set classification report:")
     str_names = [str(c) for c in label_encoder.classes_]
-    print(classification_report(test_true_labels,test_predictions,target_names=str_names,zero_division=0))
+    print(classification_report(test_true_labels,test_predictions,target_names=str_names,zero_division=0,digits=4))
     loss_result_plt(train_losses_per_epoch, val_losses_per_epoch, test_losses_per_epoch) #画出损失函数曲线
 
     return model, label_encoder
 
 # 测试函数，计算损失和准确率
-# def test(model, test_loader, device, scaler, weight_tensor=None, alpha=0.5):
-#     model.eval()
-#     total_correct_frames = 0 # [新增]
-#     total_frames = 0         # [新增]
-#     running_loss = 0.0
-#     # --- 初始化用于GPU计数的张量 ---
-#     total_correct_gpu = torch.tensor(0.0, device=device)
-#     total_samples_gpu = torch.tensor(0.0, device=device)
-
-#     with torch.no_grad():
-#         for batch_idx, (data, target) in enumerate(test_loader):
-#             data, target = data.to(device), target.to(device)
-#             with torch.amp.autocast('cuda'):
-#                 emissions, mask = model(data)
-
-#                 # --- 为了和训练loss可比，这里也计算组合损失 ---
-#                 loss_crf = -model.crf(emissions, target, mask=mask)
-#                 emissions_flat = emissions.reshape(-1, emissions.shape[-1])
-#                 target_flat = target.reshape(-1)
-#                 active_loss_mask = mask.reshape(-1) == 1
-#                 active_emissions = emissions_flat[active_loss_mask]
-#                 active_targets = target_flat[active_loss_mask]
-
-#                 cross_entropy_func = nn.CrossEntropyLoss(weight=weight_tensor, label_smoothing=0.1) # 0.1是一个常用的值
-#                 loss_ce = cross_entropy_func(active_emissions, active_targets) if weight_tensor is not None else 0
-#                 loss = loss_crf + alpha * loss_ce if weight_tensor is not None else loss_crf
-#                 # --- 结束组合损失计算 ---
-
-#                 running_loss += loss.item()
-#                 #GPU精度计算
-#                 predicted = model.crf.decode(emissions, mask=mask)
-#                 predicted_flat_cpu = [p for sublist in predicted for p in sublist]
-#                 if not predicted_flat_cpu:  continue
-#                 predicted_flat_gpu = torch.tensor(predicted_flat_cpu, device=device)
-#                 # `active_targets` 已经存在于GPU上
-#                 total_correct_gpu += (predicted_flat_gpu == active_targets).sum()
-#                 total_samples_gpu += active_targets.numel()
-
-#     final_accuracy = (total_correct_gpu / total_samples_gpu).item() if total_samples_gpu > 0 else 0.0
-
-#     return running_loss / len(test_loader), final_accuracy
 def test(model, test_loader, device, scaler, weight_tensor=None, alpha=0.5):
     model.eval()
     running_loss = 0.0
@@ -629,11 +588,9 @@ def test(model, test_loader, device, scaler, weight_tensor=None, alpha=0.5):
     # --- 原有的 Token 级计数 (保留，用于快速计算 Accuracy) ---
     total_correct_gpu = torch.tensor(0.0, device=device)
     total_samples_gpu = torch.tensor(0.0, device=device)
-
     # --- [新增] 帧级准确率计数器 ---
     total_correct_frames = 0
     total_frames = 0
-
     # --- [新增] 用于计算 Macro-F1 的列表 (收集全量数据) ---
     all_preds_cpu = []
     all_targets_cpu = []
@@ -665,7 +622,6 @@ def test(model, test_loader, device, scaler, weight_tensor=None, alpha=0.5):
                 predicted = model.crf.decode(emissions, mask=mask)
 
             # --- [修改] 指标计算逻辑 ---
-            
             # A. GPU Token 准确率计算 (你原来的逻辑，效率高，保留)
             predicted_flat_cpu = [p for sublist in predicted for p in sublist]
             if not predicted_flat_cpu: continue
@@ -703,14 +659,11 @@ def test(model, test_loader, device, scaler, weight_tensor=None, alpha=0.5):
 
     # 1. Token 级准确率
     final_token_acc = (total_correct_gpu / total_samples_gpu).item() if total_samples_gpu > 0 else 0.0
-
     # 2. [新增] 帧级准确率
     final_frame_acc = total_correct_frames / total_frames if total_frames > 0 else 0.0
-
     # 3. [新增] Macro F1 分数 (解决类别不平衡)
     # zero_division=0 防止某些类别未出现导致报错
     final_macro_f1 = f1_score(all_targets_cpu, all_preds_cpu, average='macro', zero_division=0)
-
     # 返回四个值：Loss, Token-Acc, Frame-Acc, Macro-F1
     return running_loss / len(test_loader), final_token_acc, final_frame_acc, final_macro_f1
 
