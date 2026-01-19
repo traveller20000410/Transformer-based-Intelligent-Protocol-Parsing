@@ -25,11 +25,11 @@ DATA_CACHE_PATH = "cached_data.npz"
 #生成协议数据
 def generate_protocols_dataset(num_datasets=None):
     #生成I2C协议数据与标签
-    #gen = I2C_data_generator.RealisticI2CSignalGenerator(config=I2C_data_generator.DEFAULT_I2C_CONFIG)
-    #protocols_dataset0, protocol_labels0,_,channel_maps = gen.generate_i2c_datasets(num_datasets)
+    gen = I2C_data_generator.RealisticI2CSignalGenerator(config=I2C_data_generator.DEFAULT_I2C_CONFIG)
+    protocols_dataset0, protocol_labels0,_,channel_maps = gen.generate_i2c_datasets(num_datasets)
     # 生成uart协议数据与标签
-    gen = UART_data_generator.RealisticUARTSignalGenerator(config=UART_data_generator.DEFAULT_UART_CONFIG)
-    protocols_dataset0, protocol_labels0, _, channel_maps = gen.generate_uart_datasets(num_datasets)
+    #gen = UART_data_generator.RealisticUARTSignalGenerator(config=UART_data_generator.DEFAULT_UART_CONFIG)
+    #protocols_dataset0, protocol_labels0, _, channel_maps = gen.generate_uart_datasets(num_datasets)
 
     return protocols_dataset0, protocol_labels0,channel_maps
 
@@ -72,8 +72,8 @@ def train_transformer_model(mode='teacher', num_datasets=70):
         # 1. 定义教师模型架构
         print("[main.py] 正在加载教师模型...")
         # (确保这里的 16 是您教师模型的 output_dim)
-        #output_dim = len(I2C_data_generator.LABEL_MAP)  # 应该是 16
-        output_dim = len(UART_data_generator.LABEL_MAP)
+        output_dim = len(I2C_data_generator.LABEL_MAP)  # 应该是 16
+        #output_dim = len(UART_data_generator.LABEL_MAP)
 
         teacher_model = TeacherTransformerModel(
             output_dim, TEACHER_MAX_LENGTH, TEACHER_D_MODEL, TEACHER_NUM_HEADS,
@@ -87,8 +87,6 @@ def train_transformer_model(mode='teacher', num_datasets=70):
             print("请先运行 'teacher' 模式进行训练。")
             return
 
-        # ------------------- [新的修复代码块] -------------------
-        # 加载 state_dict 到 CPU
         state_dict = torch.load(teacher_checkpoint_path, map_location='cpu')
         
         # 自动检测并清理 '_orig_mod.' 前缀
