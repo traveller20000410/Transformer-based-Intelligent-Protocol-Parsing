@@ -616,7 +616,7 @@ def train_model(protocols_dataset, protocol_labels):
 #     final_accuracy = (total_correct_gpu / total_samples_gpu).item() if total_samples_gpu > 0 else 0.0
 
 #     return running_loss / len(test_loader), final_accuracy
-    def test(model, test_loader, device, scaler, weight_tensor=None, alpha=0.5):
+def test(model, test_loader, device, scaler, weight_tensor=None, alpha=0.5):
     model.eval()
     running_loss = 0.0
     
