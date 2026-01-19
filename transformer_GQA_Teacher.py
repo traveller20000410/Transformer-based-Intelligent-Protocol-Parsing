@@ -471,14 +471,20 @@ def train_model(protocols_dataset, protocol_labels):
             else:
                 current_alpha = FINAL_ALPHA
             train_loss, train_acc = train(model, train_loader, optimizer, device, scaler,scheduler,class_weights_tensor,alpha=current_alpha, do_profiling=do_profile)
-            val_loss, val_acc = test(model, val_loader, device, scaler,weight_tensor=class_weights_tensor, alpha=current_alpha)  # 验证集评估
-            test_loss, test_acc = test(model, test_loader, device, scaler)
+            #val_loss, val_acc = test(model, val_loader, device, scaler,weight_tensor=class_weights_tensor, alpha=current_alpha)  # 验证集评估
+            val_loss, val_token_acc, val_frame_acc, val_f1 = test(model, val_loader, device, scaler, weight_tensor=class_weights_tensor, alpha=current_alpha)
+            #test_loss, test_acc = test(model, test_loader, device, scaler)
+            test_loss, test_token_acc, test_frame_acc, test_f1 = test(model, test_loader, device, scaler)
             elapsed_time = time.time() - start_time
             train_losses_per_epoch.append(train_loss); val_losses_per_epoch.append(val_loss); test_losses_per_epoch.append(test_loss)
             scheduler.step()  # 更新学习率
             print(f'/****Epoch {epoch + 1}, Learning Rate: {optimizer.param_groups[0]["lr"]}****/, Alpha: {current_alpha:.3f}****/ ')
-            print(f'Epoch {epoch + 1}/{EPOCHS}: Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f}, '
-                  f'Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}, Test Loss: {test_loss:.4f}, Test Acc: {test_acc:.4f}')
+            # print(f'Epoch {epoch + 1}/{EPOCHS}: Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f}, '
+            #       f'Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}, Test Loss: {test_loss:.4f}, Test Acc: {test_acc:.4f}')
+            print(f'Epoch {epoch + 1}/{EPOCHS} | '
+                f'Train Loss: {train_loss:.4f} | '
+                f'Val Loss: {val_loss:.4f} (F1: {val_f1:.4f}, FrameAcc: {val_frame_acc:.4f}) | '
+                f'Test Loss: {test_loss:.4f} (F1: {test_f1:.4f})')
             print(f"Time elapsed: {elapsed_time:.2f} seconds")
 
             # —— 每 20 轮打印一次分类报告 —— #
