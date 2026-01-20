@@ -22,7 +22,7 @@ LEARNING_RATE =     0.0004;                     D_MODEL =       64
 NUM_HEADS =         4;                          NUM_LAYERS =    4
 DROPOUT =           0.1;                        MAX_LENGTH =    1250
 NUM_GROUPS =        2 ;                         PATIENCE=       20;
-INITIAL_ALPHA =     1.0;                        FINAL_ALPHA =   0.2
+INITIAL_ALPHA =     1.0;                        FINAL_ALPHA =   0.5
 ALPHA_DECAY_EPOCHS = EPOCHS * 0.7               #SCHEDULER_PATIENCE=15;
 
 #缓存数据类
@@ -223,6 +223,7 @@ class TransformerModel(nn.Module):
         emissions_short = emissions_short.permute(0, 2, 1) # -> (B, 16, 625)
         emissions_long = self.upsample(emissions_short)    # -> (B, 16, 1250) <-- 恢复长度
         emissions = emissions_long.permute(0, 2, 1)        # -> (B, 1250, 16)
+        emissions = torch.clamp(emissions, min=-30.0, max=30.0)   # 将 logits 限制在 [-30, 30] 之间
         
         mask_long = torch.ones(emissions.shape[0], emissions.shape[1], dtype=torch.bool, device=x.device)
 
@@ -266,6 +267,7 @@ def train(model, train_loader, optimizer, device,scaler,scheduler,weight_tensor=
 
         scaler.scale(loss).backward()
         scaler.step(optimizer)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)   #梯度裁剪
         scaler.update()
         #性能分析
         if do_profiling:
