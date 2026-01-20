@@ -1,4 +1,5 @@
 import i2c_data_gen_one_frame as I2C_data_generator;            import uart as UART_data_generator;
+import spi_data_gen as SPI_data_generator;
 import torch;   import os;                                      import json;
 from scipy import stats;                                        import torch.nn.functional as F
 import numpy as np;                                             from universal_function import save_downsampled_csv
@@ -19,22 +20,44 @@ from transformer_GQA_Teacher import train_model as GQA_train_model # 导入教�
 from transformer_GQA_Student import train_model_distill as GQA_train_model_distill
 
 #定义
+CURRENT_PROTOCOL = 'spi' 
 RESUME_TRAINING = False
-DATA_CACHE_PATH = "cached_data.npz"
+DATA_CACHE_PATH = f"cached_data_{CURRENT_PROTOCOL}.npz" # 缓存文件区分协议
 
 #生成协议数据
-def generate_protocols_dataset(num_datasets=None):
-    #生成I2C协议数据与标签
-    #gen = I2C_data_generator.RealisticI2CSignalGenerator(config=I2C_data_generator.DEFAULT_I2C_CONFIG)
-    #protocols_dataset0, protocol_labels0,_,channel_maps = gen.generate_i2c_datasets(num_datasets)
-    # 生成uart协议数据与标签
-    gen = UART_data_generator.RealisticUARTSignalGenerator(config=UART_data_generator.DEFAULT_UART_CONFIG)
-    protocols_dataset0, protocol_labels0, _, channel_maps = gen.generate_uart_datasets(num_datasets)
+def generate_protocols_dataset(protocol_type, num_datasets=None):
+    if protocol_type == 'uart':
+        print(f"Generating {num_datasets} UART samples...")
+        gen = UART_data_generator.RealisticUARTSignalGenerator(config=UART_data_generator.DEFAULT_UART_CONFIG)
+        # UART 生成器返回: data, labels, events, maps
+        return gen.generate_uart_datasets(num_datasets)
+        
+    elif protocol_type == 'i2c':
+        print(f"Generating {num_datasets} I2C samples...")
+        gen = I2C_data_generator.RealisticI2CSignalGenerator(config=I2C_data_generator.DEFAULT_I2C_CONFIG)
+        # I2C 生成器返回: data, labels, events, maps
+        return gen.generate_i2c_datasets(num_datasets)
+        
+    elif protocol_type == 'spi':
+        print(f"Generating {num_datasets} SPI samples...")
+        gen = SPI_data_generator.RealisticSPISignalGenerator(config=SPI_data_generator.DEFAULT_SPI_CONFIG)
+        # SPI 生成器返回: data, labels, events, maps
+        return gen.generate_spi_datasets(num_datasets)
+    
+    else:
+        raise ValueError(f"Unknown protocol type: {protocol_type}")
+        
+def get_label_map(protocol_type):
+    if protocol_type == 'uart':
+        return UART_data_generator.LABEL_MAP
+    elif protocol_type == 'i2c':
+        return I2C_data_generator.LABEL_MAP
+    elif protocol_type == 'spi':
+        return SPI_data_generator.LABEL_MAP
+    else:
+        raise ValueError("Unknown protocol")
 
-    return protocols_dataset0, protocol_labels0,channel_maps
-
-
-def train_transformer_model(mode='teacher', num_datasets=70):
+def train_transformer_model(mode='teacher', num_datasets=3000):
     if RESUME_TRAINING and os.path.exists(DATA_CACHE_PATH):
         print("[main.py] 加载之前缓存的数据...")
         cached = np.load(DATA_CACHE_PATH, allow_pickle=False)
@@ -88,60 +111,25 @@ def train_transformer_model(mode='teacher', num_datasets=70):
             return
 
         state_dict = torch.load(teacher_checkpoint_path, map_location='cpu')
-        
-        # 自动检测并清理 '_orig_mod.' 前缀
-        # 检查是否有任何键以此前缀开头
         if any(k.startswith('_orig_mod.') for k in state_dict.keys()):
             print("[main.py] 检测到 'torch.compile' 权重，正在清理 '_orig_mod.' 前缀...")
-            # 使用字典推导式 (dictionary comprehension) 来创建新的 state_dict
-            # 它会遍历所有键值对，如果键以 '_orig_mod.' 开头，就去掉这个前缀 (长度为 10)
             new_state_dict = {k[len('_orig_mod.'):]: v for k, v in state_dict.items() if k.startswith('_orig_mod.')}
         else:
             print("[main.py] 未检测到 'torch.compile' 权重，正常加载。")
             new_state_dict = state_dict # 保持原样
 
-        # 加载清理后的 state_dict
-        # 我们使用 strict=True，因为 best_transformer_model.pth 应该只包含模型权重
+        # 加载清理后的 state_dict # 我们使用 strict=True，因为 best_transformer_model.pth 应该只包含模型权重
         try:
             teacher_model.load_state_dict(new_state_dict, strict=True)
         except RuntimeError as e:
-            # 如果因为某种原因 (例如文件损坏或误用) 导致严格加载失败，我们尝试非严格加载
             print(f"严格加载 (strict=True) 失败: {e}")
             print("尝试非严格加载 (strict=False)...")
             teacher_model.load_state_dict(new_state_dict, strict=False)
-        # ------------------- [修复代码块结束] -------------------
 
         print("[main.py] 教师模型加载成功。")
 
-        # 3. 启动学生模型的蒸馏训练 将 *教师模型实例* 和数据一起传递给蒸馏函数
+        #  启动学生模型的蒸馏训练 将 *教师模型实例* 和数据一起传递给蒸馏函数
         GQA_train_model_distill(teacher_model, processed_dataset, processed_labels)
-
-def export_scl_sda_from_4ch(data_4ch: np.ndarray, labels: np.ndarray, maps: list[tuple[int,int]],  base_dir: str = "scl_sda_export",sampling_rate: float = None):
-    os.makedirs(base_dir, exist_ok=True)
-    N, L, C = data_4ch.shape
-    assert C == 4, "输入必须是 4 通道"
-    for i, (scl_ch, sda_ch) in enumerate(maps):
-        scl = data_4ch[i, :, scl_ch]
-        sda = data_4ch[i, :, sda_ch]
-        lab = labels[i]
-        # 可选地，生成 时间 列
-        if sampling_rate:
-            time_us = np.arange(L) / sampling_rate * 1e6
-            df = pd.DataFrame({
-                "Time_us": time_us,
-                "SCL":      scl,
-                "SDA":      sda,
-                "Label":    lab,
-            })
-        else:
-            df = pd.DataFrame({
-                "SCL":   scl,
-                "SDA":   sda,
-                "Label": lab,
-            })
-        path = os.path.join(base_dir, f"ds_{i:03d}.csv")
-        df.to_csv(path, index=False)
-    print(f">>> 已导出 {N} 条仅含 SCL/SDA 的 CSV 到：{base_dir}/")
 
 def save_for_csharp_onnx(data_4ch_norm: np.ndarray,out_dir: str = "csharp_onnx_data",prefix: str = "i2c",norm_meta: dict | None = None):
     os.makedirs(out_dir, exist_ok=True)
@@ -172,6 +160,38 @@ def save_for_csharp_onnx(data_4ch_norm: np.ndarray,out_dir: str = "csharp_onnx_d
         json.dump(manifest, f, ensure_ascii=False, indent=2)
 
     print(f">>> Saved {N} samples to '{out_dir}' as float32 [0,1].")
+
+def save_for_csharp_onnx(data_4ch_norm: np.ndarray, out_dir: str, prefix: str, label_map: dict, norm_meta: dict | None = None):
+    os.makedirs(out_dir, exist_ok=True)
+    N, L, C = data_4ch_norm.shape
+    assert C == 4, f"expect 4 channels, got {C}"
+
+    # 反转字典: {0: "IDLE", 1: "START", ...}
+    class_map = {int(v): k for k, v in label_map.items()}
+
+    manifest = {
+        "version": 1,
+        "num_samples": int(N),
+        "length": int(L),
+        "num_channels": int(C),
+        "dtype": "float32",
+        "layout": "LxC row-major",
+        "class_map": class_map,
+        "protocol": prefix, # 记录协议类型
+        "norm": norm_meta or {"type":"minmax","per_channel":True,"range":[0.0,1.0]},
+        "files": []
+    }
+
+    for i in range(min(N, 20)): # 只保存前20个做演示，别存几千个
+        x = np.ascontiguousarray(data_4ch_norm[i].astype(np.float32))
+        x_path = os.path.join(out_dir, f"{prefix}_{i:04d}.bin")
+        x.tofile(x_path)
+        manifest["files"].append({"x": os.path.basename(x_path), "shape": [int(L), int(C)]})
+
+    with open(os.path.join(out_dir, "manifest.json"), "w", encoding="utf-8") as f:
+        json.dump(manifest, f, ensure_ascii=False, indent=2)
+
+    print(f">>> Saved {min(N, 20)} samples to '{out_dir}' with {len(class_map)} classes.")
 
 def preprocess_dataset(dataset, labels, target_length=1250, normalize=True,v_low=0.0, v_high=3.3):
     data_tensor = torch.from_numpy(dataset).float().permute(0, 2, 1)
