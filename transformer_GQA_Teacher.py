@@ -3,7 +3,8 @@ from torch.utils.data import Dataset, DataLoader;               from sklearn.mod
 import numpy as np;     from torch.profiler import profile, ProfilerActivity, schedule, tensorboard_trace_handler
 import time;      import math;                                  from transformer_component import weighted_cross_entropy_loss,check_pth_is_accessible,export_to_onnx,loss_result_plt,preprocess_data
 from joblib import load;                                        from torch.utils.checkpoint import checkpoint
-from sklearn.metrics import classification_report,f1_score;     from sklearn.utils.class_weight import compute_class_weight # 导入一个方便的工具
+from sklearn.metrics import classification_report,f1_score，confusion_matrix;     import seaborn as sns；  import matplotlib.pyplot as plt
+from sklearn.utils.class_weight import compute_class_weight # 导入一个方便的工具
 from torch.cuda.amp import autocast, GradScaler;                import xformers.ops as xops
 from xformers.ops.fmha import attn_bias;                        import torch._dynamo as dynamo
 from torch.optim.lr_scheduler import StepLR, MultiStepLR, ReduceLROnPlateau, CosineAnnealingLR
@@ -578,6 +579,8 @@ def train_model(protocols_dataset, protocol_labels):
     print("Test set classification report:")
     str_names = [str(c) for c in label_encoder.classes_]
     print(classification_report(test_true_labels,test_predictions,target_names=str_names,zero_division=0,digits=4))
+    print("Generating Confusion Matrix...")       # 绘制混淆矩阵 ---
+    plot_confusion_matrix(y_true=test_true_labels, y_pred=test_predictions, classes=str_names, title=f'Confusion Matrix (Test Set) - Macro F1: {f1_score(test_true_labels, test_predictions, average="macro"):.4f}',save_path='confusion_matrix_test.png')
     loss_result_plt(train_losses_per_epoch, val_losses_per_epoch, test_losses_per_epoch) #画出损失函数曲线
 
     return model, label_encoder
@@ -586,7 +589,6 @@ def train_model(protocols_dataset, protocol_labels):
 def test(model, test_loader, device, scaler, weight_tensor=None, alpha=0.5):
     model.eval()
     running_loss = 0.0
-    
     # --- 原有的 Token 级计数 (保留，用于快速计算 Accuracy) ---
     total_correct_gpu = torch.tensor(0.0, device=device)
     total_samples_gpu = torch.tensor(0.0, device=device)
@@ -682,6 +684,27 @@ def predict_protocol(model, data):
         predicted_protocol = label_encoder.inverse_transform(predicted)
     return predicted_protocol[:len(data[0])]
 
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.metrics import confusion_matrix
+
+def plot_confusion_matrix(y_true, y_pred, classes, title='Confusion Matrix', save_path='confusion_matrix.png'):
+    cm = confusion_matrix(y_true, y_pred, labels=range(len(classes)))
+    cm_norm = cm.astype('float') / (cm.sum(axis=1)[:, np.newaxis] + 1e-10)
+    plt.figure(figsize=(12, 10)) # 图大一点，防止文字挤在一起
+    sns.heatmap(cm_norm, annot=True, fmt=".2f", cmap="Blues", 
+                xticklabels=classes, yticklabels=classes,
+                cbar_kws={'label': 'Scale (Normalized)'})
+    
+    plt.title(title, fontsize=16)
+    plt.ylabel('True Label', fontsize=14)
+    plt.xlabel('Predicted Label', fontsize=14)
+    plt.xticks(rotation=45, ha='right') # 标签倾斜，防止重叠
+    plt.tight_layout()
+
+    plt.savefig(save_path, dpi=300)
+    print(f"✅ Confusion Matrix saved to: {save_path}")
+    plt.close()
 
 def predict_with_model(model, test_data):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
