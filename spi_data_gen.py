@@ -21,7 +21,7 @@ def get_label_name(label_id):
 DEFAULT_SPI_CONFIG = {
     'voltage_high': 3.3,
     'voltage_low': 0.0,
-    'voltage_noise_std': 0.03,
+    'voltage_noise_std': 0.02,
     'jitter_std_factor': 0.02,
     
     'clk_freq_options': [100e3, 500e3, 1e6, 5e6],
@@ -37,15 +37,15 @@ DEFAULT_SPI_CONFIG = {
 
     # [新增] 位宽多样性
     'prob_8bit': 0.6,         # 60% 是标准 8-bit
-    'prob_16bit': 0.2,        # 20% 是 16-bit
-    'prob_custom_bit': 0.2,   # 20% 是奇怪的位宽 (9, 10, 12...)
+    'prob_16bit': 0.3,        # 20% 是 16-bit
+    'prob_custom_bit': 0.1,   # 20% 是奇怪的位宽 (9, 10, 12...)
 
     # [新增] 大小端模式
     'prob_lsb_first': 0.2,    # 20% 概率低位先行
 
     # [新增] 高阻态模拟
     'high_z_noise_std': 0.1,  # 悬空时的噪声更大
-    'crosstalk_factor': 0.15
+    'crosstalk_factor': 0.1
 }
 
 class RealisticSPISignalGenerator:
