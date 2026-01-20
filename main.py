@@ -66,7 +66,7 @@ def train_transformer_model(mode='teacher', num_datasets=3000):
     else:
         print("[main.py] 重新生成并处理数据...")
         # 生成协议数据与标签
-        protocols_dataset, protocol_labels,channel_maps = generate_protocols_dataset(num_datasets)
+        protocols_dataset, protocol_labels,channel_maps = generate_protocols_dataset(CURRENT_PROTOCOL,num_datasets)
         print(f"[main.py] Shape after generation: {protocols_dataset.shape}")
         #预处理
         processed_dataset,processed_labels=preprocess_dataset(protocols_dataset, protocol_labels)
