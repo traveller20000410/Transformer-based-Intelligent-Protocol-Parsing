@@ -3,7 +3,7 @@ from torch.utils.data import Dataset, DataLoader;               from sklearn.mod
 import numpy as np;     from torch.profiler import profile, ProfilerActivity, schedule, tensorboard_trace_handler
 import time;      import math;                                  from transformer_component import weighted_cross_entropy_loss,check_pth_is_accessible,export_to_onnx,loss_result_plt,preprocess_data
 from joblib import load;                                        from torch.utils.checkpoint import checkpoint
-from sklearn.metrics import classification_report,f1_score，confusion_matrix;     import seaborn as sns；  import matplotlib.pyplot as plt
+from sklearn.metrics import classification_report,f1_score,confusion_matrix;     import seaborn as sns；  import matplotlib.pyplot as plt
 from sklearn.utils.class_weight import compute_class_weight # 导入一个方便的工具
 from torch.cuda.amp import autocast, GradScaler;                import xformers.ops as xops
 from xformers.ops.fmha import attn_bias;                        import torch._dynamo as dynamo
