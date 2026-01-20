@@ -6,16 +6,16 @@ import os
 # --- UART 标签定义 (新增异常标签) ---
 LABEL_MAP = {
     "IDLE": 0,
-    "START": 1,
-    "STOP": 2,
-    "DATA_0": 3,
-    "DATA_1": 4,
-    "PARITY_0": 5,
-    "PARITY_1": 6,
-    "GLITCH": 7,  # 噪声/毛刺
-    "PARITY_ERROR": 8,  # 校验位错误
-    "FRAMING_ERROR": 9,  # 帧错误（停止位缺失）
-    "BREAK": 10  # Break 信号
+    #"START": 1,  #由于和IDLE没有区分度，因此将其删除
+    "STOP": 1,
+    "DATA_0": 2,
+    "DATA_1": 3,
+    "PARITY_0": 4,
+    "PARITY_1": 5,
+    "GLITCH": 6,  # 噪声/毛刺
+    "PARITY_ERROR": 7,  # 校验位错误
+    "FRAMING_ERROR": 8,  # 帧错误（停止位缺失）
+    "BREAK": 9  # Break 信号
 }
 
 
@@ -70,8 +70,8 @@ class RealisticUARTSignalGenerator:
         self.config = config
         self.voltage_high = config['voltage_high']
         self.voltage_low = config['voltage_low']
-        self.voltage_noise_std = config.get('voltage_noise_std', 0.03)
-        self.jitter_std_factor = config.get('jitter_std_factor', 0.02)
+        self.voltage_noise_std = config.get('voltage_noise_std', 0.00)
+        self.jitter_std_factor = config.get('jitter_std_factor', 0.00)
 
         self.baud_rate = None
         self.sampling_rate = None
@@ -427,6 +427,7 @@ if __name__ == '__main__':
     tx_ch = all_maps[idx][0]
 
     gen.plot_signals(all_data[idx][:, tx_ch], all_labels[idx], title="Generated UART (with Error Injection)")
+
 
 
 
