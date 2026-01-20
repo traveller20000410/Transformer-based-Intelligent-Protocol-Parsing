@@ -88,7 +88,12 @@ class RealisticUARTSignalGenerator:
 
         min_sr = 40 * self.baud_rate
         max_sr = 200 * self.baud_rate
-        # 2. 选择采样率
+        # 2.动态电压
+        level_std = np.random.choice([1.8, 2.5, 3.3, 5.0])
+        # 加上一点随机偏差 (如电源纹波导致 3.3V 变成 3.25V)
+        self.voltage_high = level_std * np.random.uniform(0.95, 1.05)
+        self.voltage_low = 0.0 + np.random.normal(0, 0.05) # 地电平也不一定是完美的 0
+        # 3. 选择采样率
         valid_srs = [
             sr for sr in self.config['sampling_rate_options'] 
             if min_sr <= sr <= max_sr
@@ -112,7 +117,7 @@ class RealisticUARTSignalGenerator:
 
         self.samples_per_bit = int(self.sampling_rate / self.baud_rate)
 
-        # 3. 选择协议格式
+        # 4. 选择协议格式
         p_rand = np.random.rand()
         if p_rand < self.config['prob_parity_none']:
             self.parity = 'NONE'
@@ -232,7 +237,8 @@ class RealisticUARTSignalGenerator:
                 w, l = self._generate_bit_waveform(0, LABEL_MAP['FRAMING_ERROR'], drift)
             else:
                 # 正常停止位
-                w, l = self._generate_bit_waveform(1, LABEL_MAP['STOP'], drift)
+                #w, l = self._generate_bit_waveform(1, LABEL_MAP['STOP'], drift)  #不对停止位和IDLE进行区分
+                w, l = self._generate_bit_waveform(1, LABEL_MAP['IDLE'], drift) 
             seq_wave.append(w);
             seq_label.append(l)
 
@@ -427,6 +433,7 @@ if __name__ == '__main__':
     tx_ch = all_maps[idx][0]
 
     gen.plot_signals(all_data[idx][:, tx_ch], all_labels[idx], title="Generated UART (with Error Injection)")
+
 
 
 
