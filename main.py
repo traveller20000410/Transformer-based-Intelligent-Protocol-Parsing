@@ -58,6 +58,8 @@ def get_label_map(protocol_type):
         raise ValueError("Unknown protocol")
 
 def train_transformer_model(mode='teacher', num_datasets=3000):
+    current_label_map = get_label_map(CURRENT_PROTOCOL)
+    output_dim = len(current_label_map)
     if RESUME_TRAINING and os.path.exists(DATA_CACHE_PATH):
         print("[main.py] 加载之前缓存的数据...")
         cached = np.load(DATA_CACHE_PATH, allow_pickle=False)
@@ -73,7 +75,7 @@ def train_transformer_model(mode='teacher', num_datasets=3000):
         print(f"[main.py] Shape after downsampling: {processed_dataset.shape}")
 
         # 导出给 C# ONNX 推理使用：每条样本一个 (L,4) float32 .bin
-        save_for_csharp_onnx(processed_dataset,out_dir="csharp_onnx_data",prefix="i2c",norm_meta={"type": "minmax", "per_channel": True, "range": [0.0, 1.0]})
+        save_for_csharp_onnx(processed_dataset,out_dir=f"csharp_onnx_data_{CURRENT_PROTOCOL}", prefix=CURRENT_PROTOCOL, label_map=current_label_map,norm_meta={"type": "minmax", "per_channel": True, "range": [-0.2, 1.5]})
         np.savez(DATA_CACHE_PATH, data=processed_dataset, labels=processed_labels)
 
         # 3) 导出下采样后的 SCL/SDA
