@@ -6,8 +6,8 @@ import os
 # --- UART 标签定义 (新增异常标签) ---
 LABEL_MAP = {
     "IDLE": 0,
-    #"START": 1,  #由于和IDLE没有区分度，因此将其删除
-    "STOP": 1,
+    "START": 1,  
+    #"STOP": 1,  #由于和IDLE没有区分度，因此将其删除
     "DATA_0": 2,
     "DATA_1": 3,
     "PARITY_0": 4,
@@ -433,6 +433,7 @@ if __name__ == '__main__':
     tx_ch = all_maps[idx][0]
 
     gen.plot_signals(all_data[idx][:, tx_ch], all_labels[idx], title="Generated UART (with Error Injection)")
+
 
 
 
