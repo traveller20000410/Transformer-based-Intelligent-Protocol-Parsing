@@ -1,13 +1,14 @@
 import torch,   torchcrf,   torch.onnx,    torch.nn as nn,      torch.nn.functional as F   ,os
 from torch.utils.data import Dataset, DataLoader;               from sklearn.model_selection import train_test_split
 import numpy as np;     from torch.profiler import profile, ProfilerActivity, schedule, tensorboard_trace_handler
-import time;      import math;                                  from transformer_component import weighted_cross_entropy_loss,check_pth_is_accessible,export_to_onnx,loss_result_plt,preprocess_data
+import time;      import math;       import datetime;          from transformer_component import weighted_cross_entropy_loss,check_pth_is_accessible,export_to_onnx,loss_result_plt,preprocess_data
 from joblib import load;                                        from torch.utils.checkpoint import checkpoint
 from sklearn.metrics import classification_report,f1_score,confusion_matrix;     import seaborn as sns;  import matplotlib.pyplot as plt
-from sklearn.utils.class_weight import compute_class_weight # 导入一个方便的工具
+from sklearn.utils.class_weight import compute_class_weight;   from torch.utils.tensorboard import SummaryWriter 
 from torch.cuda.amp import autocast, GradScaler;                import xformers.ops as xops
 from xformers.ops.fmha import attn_bias;                        import torch._dynamo as dynamo
 from torch.optim.lr_scheduler import StepLR, MultiStepLR, ReduceLROnPlateau, CosineAnnealingLR
+
 
 @dynamo.disable
 def _fmha(q, k, v, p, bias, training: bool):
@@ -378,13 +379,15 @@ def train_model(protocols_dataset, protocol_labels):
     print("High-performance TensorDatasets created.")
 
     # 4. DataLoader的定义保持不变，它现在包裹的是我们高效的Dataset
-    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=4, pin_memory=True,
-                              persistent_workers=True)
-    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=4, pin_memory=True,
-                            persistent_workers=True)
-    test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=4, pin_memory=True,
-                             persistent_workers=True)
-
+    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=4, pin_memory=True,persistent_workers=True)
+    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=4, pin_memory=True,persistent_workers=True)
+    test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=4, pin_memory=True,persistent_workers=True)
+    
+    # 加载tensorboard
+    log_dir = "runs/" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    writer = SummaryWriter(log_dir)
+    print(f"✅ TensorBoard logging to: {log_dir}")
+    
     # 初始化模型、损失函数和优化器
     output_dim = len(label_encoder.classes_)  #16
     model = TransformerModel(output_dim, MAX_LENGTH, D_MODEL, NUM_HEADS, NUM_LAYERS, DROPOUT,NUM_GROUPS)
@@ -489,6 +492,20 @@ def train_model(protocols_dataset, protocol_labels):
                 f'Val: Loss={val_loss:.4f} T_Acc={val_token_acc:.4f} F_Acc={val_frame_acc:.4f} F1={val_f1:.4f} | '
                 f'Test: F_Acc={test_frame_acc:.4f} F1={test_f1:.4f}')
             print(f"Time elapsed: {elapsed_time:.2f} seconds")
+            
+            # 写入 TensorBoard
+            # 1. 记录 Loss
+            writer.add_scalar('Loss/Train', train_loss, epoch)
+            writer.add_scalar('Loss/Val', val_loss, epoch)
+            writer.add_scalar('Loss/Test', test_loss, epoch)
+            # 2. 记录 Accuracy (Token级 & Frame级)
+            writer.add_scalar('Accuracy/Val_Token', val_token_acc, epoch)
+            writer.add_scalar('Accuracy/Val_Frame', val_frame_acc, epoch)
+            # 3. 记录 F1 Score
+            writer.add_scalar('Metrics/Val_MacroF1', val_f1, epoch)
+            # 4. 记录学习率
+            current_lr = optimizer.param_groups[0]['lr']
+            writer.add_scalar('Parameters/Learning_Rate', current_lr, epoch)
 
             # —— 每 20 轮打印一次分类报告 —— #
             if (epoch + 1) % 20 == 0:
@@ -548,6 +565,7 @@ def train_model(protocols_dataset, protocol_labels):
         # }, checkpoint_path)
         # print(f"已保存检查点到 {checkpoint_path}");            print("退出训练。")
 
+        writer.close()  # 关闭tensorboard
         return model, label_encoder  # 或者您可以选择重新抛出异常
 
     # 在训练集上评估
