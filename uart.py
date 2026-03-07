@@ -6,16 +6,16 @@ import os
 # --- UART 标签定义 (新增异常标签) ---
 LABEL_MAP = {
     "IDLE": 0,
-    "START": 1,  
-    #"STOP": 1,  #由于和IDLE没有区分度，因此将其删除
-    "DATA_0": 2,
-    "DATA_1": 3,
-    "PARITY_0": 4,
-    "PARITY_1": 5,
-    "GLITCH": 6,  # 噪声/毛刺
-    "PARITY_ERROR": 7,  # 校验位错误
-    "FRAMING_ERROR": 8,  # 帧错误（停止位缺失）
-    "BREAK": 9  # Break 信号
+    "START": 1,
+    "STOP": 2,
+    "DATA_0": 3,
+    "DATA_1": 4,
+    "PARITY_0": 5,
+    "PARITY_1": 6,
+    "GLITCH": 7,  # 噪声/毛刺
+    "PARITY_ERROR": 8,  # 校验位错误
+    "FRAMING_ERROR": 9,  # 帧错误（停止位缺失）
+    "BREAK": 10  # Break 信号
 }
 
 
@@ -30,10 +30,14 @@ def get_label_name(label_id):
 DEFAULT_UART_CONFIG = {
     'voltage_high': 3.3,
     'voltage_low': 0.0,
-    'voltage_noise_std': 0.05,  # 增加一点底噪
-    'jitter_std_factor': 0.03,  # 增加一点时钟抖动
-    'rise_time_factor': 0.05,
-    'fall_time_factor': 0.05,
+    # 'voltage_noise_std': 0.05,  # 增加一点底噪
+    # 'jitter_std_factor': 0.03,  # 增加一点时钟抖动
+    # 'rise_time_factor': 0.05,
+    # 'fall_time_factor': 0.05,
+    'voltage_noise_std': 0.00,  # 增加一点底噪
+    'jitter_std_factor': 0.00,  # 增加一点时钟抖动
+    'rise_time_factor': 0.00,
+    'fall_time_factor': 0.00,
 
     # 基础协议参数
     'prob_parity_none': 0.3, 'prob_parity_odd': 0.35, 'prob_parity_even': 0.35,  # 增加校验位出现的概率
@@ -41,6 +45,11 @@ DEFAULT_UART_CONFIG = {
     'data_bits': 8,
 
     # --- 异常通信概率分布 (模拟现实中的恶劣环境) ---
+    # 'prob_parity_error': 0.03,  # 5% 的概率发生校验错误
+    # 'prob_framing_error': 0.03,  # 5% 的概率发生帧错误
+    # 'prob_glitch': 0.05,  # 10% 的概率出现随机毛刺
+    # 'prob_break': 0.01,  # 2% 的概率出现 Break 信号
+    # 'prob_baud_drift': 0.05,  # 10% 的概率出现波特率严重漂移
     'prob_parity_error': 0.00,  # 5% 的概率发生校验错误
     'prob_framing_error': 0.00,  # 5% 的概率发生帧错误
     'prob_glitch': 0.00,  # 10% 的概率出现随机毛刺
@@ -50,6 +59,9 @@ DEFAULT_UART_CONFIG = {
     'idle_before_min': 1, 'idle_before_max': 10,
     'inter_byte_idle_min': 0, 'inter_byte_idle_max': 5,
     'min_bytes': 2, 'max_bytes': 15,  # 增加每帧字节数，增加出错机会
+    #过采样率范围
+    'min_oversampling': 16,
+    'max_oversampling': 64,
 
     # 波特率选项
     'baud_rate_options': {
@@ -59,8 +71,8 @@ DEFAULT_UART_CONFIG = {
 
     # 采样率
     'sampling_rate_options': [
-        100e3, 200e3, 500e3, 1e6,
-        2e6, 5e6, 10e6, 20e6, 50e6, 100e6
+        100e3, 200e3, 500e3,
+        1e6, 2e6, 5e6, 10e6, 20e6, 50e6, 100e6
     ]
 }
 
@@ -70,6 +82,8 @@ class RealisticUARTSignalGenerator:
         self.config = config
         self.voltage_high = config['voltage_high']
         self.voltage_low = config['voltage_low']
+        # self.voltage_noise_std = config.get('voltage_noise_std', 0.03)
+        # self.jitter_std_factor = config.get('jitter_std_factor', 0.02)
         self.voltage_noise_std = config.get('voltage_noise_std', 0.00)
         self.jitter_std_factor = config.get('jitter_std_factor', 0.00)
 
@@ -80,44 +94,13 @@ class RealisticUARTSignalGenerator:
         self.stop_bits = 1
         self.data_bits = 8
 
-    def _select_parameters(self):
-        # 1. 选择波特率
+    def _select_parameters(self, max_samples=None):
+        # ---------- 1) 先选波特率 ----------
         br_opts = list(self.config['baud_rate_options'].keys())
         br_probs = list(self.config['baud_rate_options'].values())
-        self.baud_rate = np.random.choice(br_opts, p=br_probs)
+        self.baud_rate = int(np.random.choice(br_opts, p=br_probs))
 
-        min_sr = 40 * self.baud_rate
-        max_sr = 200 * self.baud_rate
-        # 2.动态电压
-        level_std = np.random.choice([1.8, 2.5, 3.3, 5.0])
-        # 加上一点随机偏差 (如电源纹波导致 3.3V 变成 3.25V)
-        self.voltage_high = level_std * np.random.uniform(0.95, 1.05)
-        self.voltage_low = 0.0 + np.random.normal(0, 0.05) # 地电平也不一定是完美的 0
-        # 3. 选择采样率
-        valid_srs = [
-            sr for sr in self.config['sampling_rate_options'] 
-            if min_sr <= sr <= max_sr
-        ]
-
-        if not valid_srs:
-            # 兜底逻辑：如果区间内没有选项
-            # 优先找最接近下限的（保证清晰度），如果没有大的就找最接近上限的
-            all_srs = sorted(self.config['sampling_rate_options'])
-            # 找到第一个大于 min_sr 的
-            candidates = [sr for sr in all_srs if sr >= min_sr]
-            if candidates:
-                self.sampling_rate = candidates[0] # 选最小的满足清晰度的
-            else:
-                self.sampling_rate = all_srs[-1] # 实在没办法，选最大的
-                
-            # print(f"Warning: No optimal sampling rate for baud {self.baud_rate}. Fallback to {self.sampling_rate}")
-        else:
-            # 在甜蜜点范围内随机选一个，增加数据多样性
-            self.sampling_rate = np.random.choice(valid_srs)
-
-        self.samples_per_bit = int(self.sampling_rate / self.baud_rate)
-
-        # 4. 选择协议格式
+        # ---------- 2) 选校验 ----------
         p_rand = np.random.rand()
         if p_rand < self.config['prob_parity_none']:
             self.parity = 'NONE'
@@ -126,8 +109,59 @@ class RealisticUARTSignalGenerator:
         else:
             self.parity = 'EVEN'
 
+        # ---------- 3) 选停止位 ----------
         self.stop_bits = 2 if np.random.rand() < self.config['prob_stop_2'] else 1
-        self.data_bits = self.config.get('data_bits', 8)
+
+        # ---------- 4) 数据位 ----------
+        self.data_bits = int(self.config.get('data_bits', 8))
+
+        # ---------- 5) 计算一个字节最少占多少 bit ----------
+        parity_bits = 0 if self.parity == 'NONE' else 1
+        bits_per_byte = 1 + self.data_bits + parity_bits + int(self.stop_bits)
+        #                起始位 + 数据位 + 校验位 + 停止位
+
+        # ---------- 6) 先按过采样倍数筛选采样率 ----------
+        min_oversampling = int(self.config.get('min_oversampling', 16))
+        max_oversampling = int(self.config.get('max_oversampling', 64))
+
+        min_sr = min_oversampling * self.baud_rate
+        max_sr = max_oversampling * self.baud_rate
+
+        sr_candidates = [
+            int(sr) for sr in self.config['sampling_rate_options']
+            if min_sr <= sr <= max_sr
+        ]
+
+        # ---------- 7) 再按 max_samples 做预算约束 ----------
+        if max_samples is not None:
+            min_bytes = int(self.config.get('min_bytes', 1))
+            idle_before_min = int(self.config.get('idle_before_min', 1))
+            inter_byte_idle_min = int(self.config.get('inter_byte_idle_min', 0))
+            tail_idle_bits = 3
+
+            min_total_bits = (
+                    idle_before_min
+                    + min_bytes * bits_per_byte
+                    + max(0, min_bytes - 1) * inter_byte_idle_min
+                    + tail_idle_bits
+            )
+
+            max_sr_by_budget = int((max_samples * self.baud_rate) / min_total_bits)
+
+            sr_candidates = [sr for sr in sr_candidates if sr <= max_sr_by_budget]
+
+        # ---------- 8) 没有合法采样率就报错 ----------
+        if not sr_candidates:
+            raise ValueError(
+                f"没有合法的采样率候选。"
+                f" baud={self.baud_rate}, parity={self.parity}, stop={self.stop_bits}, "
+                f"data_bits={self.data_bits}, max_samples={max_samples}, "
+                f"oversampling=[{min_oversampling}, {max_oversampling}]"
+            )
+        # ---------- 9) 从合法候选里选一个 ----------
+        self.sampling_rate = int(np.random.choice(sr_candidates))
+        # samples_per_bit 至少保证为 1
+        self.samples_per_bit = max(1, int(self.sampling_rate / self.baud_rate))
 
     def _get_samples_for_current_bit(self, drift_factor=1.0):
         # 模拟时钟抖动 + 系统性漂移
@@ -237,85 +271,114 @@ class RealisticUARTSignalGenerator:
                 w, l = self._generate_bit_waveform(0, LABEL_MAP['FRAMING_ERROR'], drift)
             else:
                 # 正常停止位
-                #w, l = self._generate_bit_waveform(1, LABEL_MAP['STOP'], drift)  #不对停止位和IDLE进行区分
-                w, l = self._generate_bit_waveform(1, LABEL_MAP['IDLE'], drift) 
+                w, l = self._generate_bit_waveform(1, LABEL_MAP['STOP'], drift)
             seq_wave.append(w);
             seq_label.append(l)
 
         return np.concatenate(seq_wave), np.concatenate(seq_label), byte_events
 
-    def generate_uart_transaction(self):
-        self._select_parameters()
+    def _bits_per_byte(self):
+        parity_bits = 0 if self.parity == 'NONE' else 1
+        return 1 + self.data_bits + parity_bits + int(self.stop_bits)
+
+    def generate_uart_transaction(self, max_samples=None):
+        self._select_parameters(max_samples=max_samples)
 
         wave_seq = []
         label_seq = []
         events = []
+        curr_len = 0
+
+        def can_fit(n_more):
+            return (max_samples is None) or (curr_len + n_more <= max_samples)
+
+        def append_seg(w, l):
+            nonlocal curr_len
+            if not can_fit(len(w)):
+                return False
+            wave_seq.append(w)
+            label_seq.append(l)
+            curr_len += len(w)
+            return True
 
         events.append({
             'type': 'CONFIG',
             'baud': self.baud_rate,
+            'sampling_rate': self.sampling_rate,
             'parity': self.parity,
-            'stop': self.stop_bits
+            'stop': self.stop_bits,
+            'data_bits': self.data_bits,
         })
 
-        # 1. 前置空闲
+        # 前置空闲
         idle_bits = np.random.randint(self.config['idle_before_min'], self.config['idle_before_max'])
         w_idle, l_idle = self._generate_bit_waveform(1, LABEL_MAP['IDLE'])
+
+        # 预留尾部 3bit 空闲
+        tail_reserve = 3 * len(w_idle)
+
         for _ in range(idle_bits):
-            wave_seq.append(w_idle);
-            label_seq.append(l_idle)
+            if max_samples is not None and curr_len + len(w_idle) + tail_reserve > max_samples:
+                break
+            append_seg(w_idle, l_idle)
 
-        # 2. 生成传输内容
-        num_bytes = np.random.randint(self.config['min_bytes'], self.config['max_bytes'] + 1)
+        num_bytes_target = np.random.randint(self.config['min_bytes'], self.config['max_bytes'] + 1)
+        bytes_generated = 0
 
-        for i in range(num_bytes):
-            # --- 异常 3: Break 信号 ---
-            if np.random.rand() < self.config['prob_break']:
-                w_bk, l_bk = self._generate_break()
-                wave_seq.append(w_bk)
-                label_seq.append(l_bk)
-                events.append({'type': 'BREAK'})
-                # Break 之后通常需要一段空闲恢复
-                wave_seq.append(w_idle);
-                label_seq.append(l_idle)
-                continue  # 跳过这次字节生成
-
-            # --- 异常 4: 随机毛刺 (Glitch) ---
-            if np.random.rand() < self.config['prob_glitch']:
-                w_gl, l_gl = self._generate_glitch()
-                wave_seq.append(w_gl)
-                label_seq.append(l_gl)
-                # 不记录 Glitch 事件，因为它是噪声，模型最好能学会忽略它或标记为 GLITCH
-
-            # 生成正常(或包含Parity/Frame错误)的字节
+        while bytes_generated < num_bytes_target:
+            # 先尝试生成一个字节
             val = np.random.randint(0, 2 ** self.data_bits)
             w_byte, l_byte, byte_evs = self._generate_uart_byte(val)
 
-            # 记录数据事件
-            if not byte_evs:  # 没有错误
+            # 估算最小附加成本：当前字节 + 尾部空闲
+            need = len(w_byte) + tail_reserve
+
+            # 如果不是最后一个字节，至少还可能有 gap
+            if bytes_generated < num_bytes_target - 1:
+                gap_bits = np.random.randint(
+                    self.config['inter_byte_idle_min'],
+                    self.config['inter_byte_idle_max'] + 1
+                )
+                need += gap_bits * len(w_idle)
+            else:
+                gap_bits = 0
+
+            if max_samples is not None and curr_len + need > max_samples:
+                break
+
+            if not byte_evs:
                 events.append({'type': 'DATA', 'value': val})
             else:
-                for err in byte_evs: events.append(err)  # 记录具体错误
+                for err in byte_evs:
+                    events.append(err)
                 events.append({'type': 'DATA_WITH_ERROR', 'value': val})
 
-            wave_seq.append(w_byte)
-            label_seq.append(l_byte)
+            append_seg(w_byte, l_byte)
+            bytes_generated += 1
 
-            # 字节间空闲
-            if i < num_bytes - 1:
-                gaps = np.random.randint(self.config['inter_byte_idle_min'], self.config['inter_byte_idle_max'] + 1)
-                for _ in range(gaps):
-                    wave_seq.append(w_idle);
-                    label_seq.append(l_idle)
+            for _ in range(gap_bits):
+                append_seg(w_idle, l_idle)
 
-        # 3. 后置空闲
+        # 如果连 min_bytes 都放不下，直接报错，说明参数组合不合法
+        if bytes_generated < self.config['min_bytes']:
+            raise ValueError(
+                f"当前参数组合在 max_samples={max_samples} 下无法容纳最少 {self.config['min_bytes']} 个字节"
+            )
+
+        # 后置空闲
         for _ in range(3):
-            wave_seq.append(w_idle);
-            label_seq.append(l_idle)
+            if not append_seg(w_idle, l_idle):
+                break
 
         raw_wave = np.concatenate(wave_seq)
         final_wave = self.add_noise(self.add_transition_time(raw_wave))
         final_labels = np.concatenate(label_seq)
+        print("DEBUG [generate_uart_transaction]")
+        print("DEBUG baud =", self.baud_rate)
+        print("DEBUG sampling_rate =", self.sampling_rate)
+        print("DEBUG samples_per_bit =", self.samples_per_bit)
+        print("DEBUG wave_len =", len(final_wave))
+        print("DEBUG first event =", events[0])
 
         return final_wave, final_labels, events
 
@@ -327,7 +390,7 @@ class RealisticUARTSignalGenerator:
         all_channel_maps = []
 
         for i in range(num_datasets):
-            tx_raw, labels_raw, events = self.generate_uart_transaction()
+            tx_raw, labels_raw, events = self.generate_uart_transaction(max_samples=samples_per_dataset)
 
             tx_ch = 0
             all_channel_maps.append((tx_ch,))
@@ -336,11 +399,13 @@ class RealisticUARTSignalGenerator:
             final_waveform_4ch = np.full((samples_per_dataset, 4), self.voltage_high, dtype=np.float32)
             final_waveform_4ch += np.random.normal(0, self.voltage_noise_std / 2, final_waveform_4ch.shape)
 
-            L = min(len(tx_raw), samples_per_dataset)
-            final_waveform_4ch[:L, tx_ch] = tx_raw[:L]
+            L = len(tx_raw)
+            if L > samples_per_dataset:
+                raise RuntimeError(f"生成结果长度 {L} 超过预算 {samples_per_dataset}")
+            final_waveform_4ch[:L, tx_ch] = tx_raw
 
             final_labels = np.full(samples_per_dataset, LABEL_MAP['IDLE'], dtype=np.int64)
-            final_labels[:L] = labels_raw[:L]
+            final_labels[:L] = labels_raw
 
             all_datasets_np[i] = final_waveform_4ch
             all_labels_np[i] = final_labels
@@ -351,6 +416,9 @@ class RealisticUARTSignalGenerator:
     # (plot_signals 和 save_dataset 函数与之前相同，此处省略以节省空间，可直接复用)
     # ... 请确保保留之前代码中的 save_dataset 和 plot_signals ...
     def save_dataset(self, wave, labels, events, base_dir, prefix="uart"):
+        print("DEBUG [save_dataset]")
+        print("DEBUG save wave_len =", len(wave))
+        print("DEBUG save first event =", events[0])
         os.makedirs(base_dir, exist_ok=True)
         # 文件编号逻辑
         existing_files = [f for f in os.listdir(base_dir) if f.startswith(f"{prefix}-") and f.endswith(".csv")]
@@ -367,23 +435,33 @@ class RealisticUARTSignalGenerator:
         # 保存 CSV (Time, TX, Label)
         with open(csv_path, 'w', newline='') as csvfile:
             writer = csv.writer(csvfile)
-            writer.writerow(['Time_Index', 'TX', 'Label'])
+            writer.writerow(['Time_s', 'TX', 'Label'])
             for i in range(len(wave)):
-                writer.writerow([i, wave[i], int(labels[i])])
+                writer.writerow([i / self.sampling_rate, wave[i], int(labels[i])])
         print(f"Saved waveform to: {csv_path}")
 
         # 保存事件 TXT
-        with open(txt_path, 'w') as txtfile:
+        with open(txt_path, 'w', encoding='utf-8') as txtfile:
+            config_event = next((e for e in events if e['type'] == 'CONFIG'), None)
+
+            if config_event is not None:
+                txtfile.write(
+                    f"CONFIG: Baud={config_event['baud']}, "
+                    f"SamplingRate={config_event['sampling_rate']}, "
+                    f"DataBits={config_event['data_bits']}, "
+                    f"Parity={config_event['parity']}, "
+                    f"Stop={config_event['stop']}\n"
+                )
+
             for event in events:
-                if event['type'] == 'CONFIG':
-                    txtfile.write(f"CONFIG: Baud={event['baud']}, Parity={event['parity']}, Stop={event['stop']}\n")
-                elif event['type'] == 'DATA':
+                if event['type'] == 'DATA':
                     txtfile.write(f"DATA: 0x{event['value']:02X}\n")
+                elif event['type'] == 'DATA_WITH_ERROR':
+                    txtfile.write(f"DATA_WITH_ERROR: 0x{event['value']:02X}\n")
+                elif event['type'] == 'BREAK':
+                    txtfile.write("BREAK\n")
                 elif event['type'] == 'ERROR':
-                    txtfile.write(f"ERROR: {event['subtype']}\n")
-                else:
-                    txtfile.write(f"{event['type']}\n")
-        print(f"Saved events to: {txt_path}")
+                    txtfile.write(f"ERROR: {event['error_type']}\n")
 
     def plot_signals(self, wave, labels=None, title="UART Signal", plot_samples=None):
         if plot_samples is None: plot_samples = len(wave)
@@ -429,15 +507,24 @@ if __name__ == '__main__':
     # 生成带异常的数据
     all_data, all_labels, all_events, all_maps = gen.generate_uart_datasets(num_datasets=5, samples_per_dataset=10000)
 
+    # ========== 新增：保存数据到指定文件夹 ==========
+    # 遍历生成的5组数据，逐个保存
+    for idx in range(len(all_data)):
+        tx_ch = all_maps[idx][0]
+        # 提取当前组的TX波形和标签
+        tx_wave = all_data[idx][:, tx_ch]
+        tx_labels = all_labels[idx]
+        tx_events = all_events[idx]
+
+        # 调用save_dataset保存（会自动创建output_dir文件夹）
+        gen.save_dataset(
+            wave=tx_wave,
+            labels=tx_labels,
+            events=tx_events,
+            base_dir=output_dir,  # 保存到指定目录
+            prefix="uart"  # 文件名前缀，可选
+        )
+    # ==============================================
     idx = 0
     tx_ch = all_maps[idx][0]
-
     gen.plot_signals(all_data[idx][:, tx_ch], all_labels[idx], title="Generated UART (with Error Injection)")
-
-
-
-
-
-
-
-
