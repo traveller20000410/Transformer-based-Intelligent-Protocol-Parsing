@@ -75,13 +75,8 @@ def train_transformer_model(mode='teacher', num_datasets=3000):
         print(f"[main.py] Shape after downsampling: {processed_dataset.shape}")
 
         # 导出给 C# ONNX 推理使用：每条样本一个 (L,4) float32 .bin
-        save_for_csharp_onnx(
-    processed_dataset,
-    out_dir=f"csharp_onnx_data_{CURRENT_PROTOCOL}",
-    prefix=CURRENT_PROTOCOL,
-    label_map=current_label_map,
-    norm_meta={"type": "minmax", "per_channel": True, "range": [-0.2, 1.5]})
-    np.savez(DATA_CACHE_PATH, data=processed_dataset, labels=processed_labels)
+        save_for_csharp_onnx(processed_dataset,out_dir=f"csharp_onnx_data_{CURRENT_PROTOCOL}",prefix=CURRENT_PROTOCOL,
+        label_map=current_label_map,norm_meta={"type": "minmax", "per_channel": True, "range": [-0.2, 1.5]})
         np.savez(DATA_CACHE_PATH, data=processed_dataset, labels=processed_labels)
 
         # 3) 导出下采样后的 SCL/SDA
