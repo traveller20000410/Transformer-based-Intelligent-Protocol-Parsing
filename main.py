@@ -20,7 +20,7 @@ from transformer_GQA_Teacher import train_model as GQA_train_model # 导入教�
 from transformer_GQA_Student import train_model_distill as GQA_train_model_distill
 
 #定义
-CURRENT_PROTOCOL = 'spi' 
+CURRENT_PROTOCOL = 'uart' 
 RESUME_TRAINING = False
 DATA_CACHE_PATH = f"cached_data_{CURRENT_PROTOCOL}.npz" # 缓存文件区分协议
 
@@ -75,7 +75,7 @@ def train_transformer_model(mode='teacher', num_datasets=3000):
         print(f"[main.py] Shape after downsampling: {processed_dataset.shape}")
 
         # 导出给 C# ONNX 推理使用：每条样本一个 (L,4) float32 .bin
-        save_for_csharp_onnx(processed_dataset,out_dir=f"csharp_onnx_data_{CURRENT_PROTOCOL}", prefix=CURRENT_PROTOCOL, label_map=current_label_map,norm_meta={"type": "minmax", "per_channel": True, "range": [-0.2, 1.5]})
+        (processed_dataset,out_dir=f"csharp_onnx_data_{CURRENT_PROTOCOL}", prefix=CURRENT_PROTOCOL, label_map=current_label_map,norm_meta={"type": "minmax", "per_channel": True, "range": [-0.2, 1.5]})
         np.savez(DATA_CACHE_PATH, data=processed_dataset, labels=processed_labels)
 
         # 3) 导出下采样后的 SCL/SDA
@@ -96,9 +96,7 @@ def train_transformer_model(mode='teacher', num_datasets=3000):
 
         # 1. 定义教师模型架构
         print("[main.py] 正在加载教师模型...")
-        # (确保这里的 16 是您教师模型的 output_dim)
-        #output_dim = len(I2C_data_generator.LABEL_MAP)  # 应该是 16
-        output_dim = len(UART_data_generator.LABEL_MAP)
+        output_dim = len(current_label_map)
 
         teacher_model = TeacherTransformerModel(
             output_dim, TEACHER_MAX_LENGTH, TEACHER_D_MODEL, TEACHER_NUM_HEADS,
@@ -132,36 +130,6 @@ def train_transformer_model(mode='teacher', num_datasets=3000):
 
         #  启动学生模型的蒸馏训练 将 *教师模型实例* 和数据一起传递给蒸馏函数
         GQA_train_model_distill(teacher_model, processed_dataset, processed_labels)
-
-def save_for_csharp_onnx(data_4ch_norm: np.ndarray,out_dir: str = "csharp_onnx_data",prefix: str = "i2c",norm_meta: dict | None = None):
-    os.makedirs(out_dir, exist_ok=True)
-    N, L, C = data_4ch_norm.shape
-    assert C == 4, f"expect 4 channels, got {C}"
-
-    class_map = {int(v): k for k, v in I2C_data_generator.LABEL_MAP.items()}  # :contentReference[oaicite:3]{index=3}
-
-    manifest = {
-        "version": 1,
-        "num_samples": int(N),
-        "length": int(L),
-        "num_channels": int(C),
-        "dtype": "float32",
-        "layout": "LxC row-major",
-        "class_map": class_map,
-        "norm": norm_meta or {"type":"minmax","per_channel":True,"range":[0.0,1.0]},
-        "files": []
-    }
-
-    for i in range(N):
-        x = np.ascontiguousarray(data_4ch_norm[i].astype(np.float32))  # (L,4)
-        x_path = os.path.join(out_dir, f"{prefix}_{i:04d}.bin")
-        x.tofile(x_path)
-        manifest["files"].append({"x": os.path.basename(x_path), "shape": [int(L), int(C)]})
-
-    with open(os.path.join(out_dir, "manifest.json"), "w", encoding="utf-8") as f:
-        json.dump(manifest, f, ensure_ascii=False, indent=2)
-
-    print(f">>> Saved {N} samples to '{out_dir}' as float32 [0,1].")
 
 def save_for_csharp_onnx(data_4ch_norm: np.ndarray, out_dir: str, prefix: str, label_map: dict, norm_meta: dict | None = None):
     os.makedirs(out_dir, exist_ok=True)
