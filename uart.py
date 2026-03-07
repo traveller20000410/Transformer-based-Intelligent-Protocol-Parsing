@@ -373,12 +373,6 @@ class RealisticUARTSignalGenerator:
         raw_wave = np.concatenate(wave_seq)
         final_wave = self.add_noise(self.add_transition_time(raw_wave))
         final_labels = np.concatenate(label_seq)
-        print("DEBUG [generate_uart_transaction]")
-        print("DEBUG baud =", self.baud_rate)
-        print("DEBUG sampling_rate =", self.sampling_rate)
-        print("DEBUG samples_per_bit =", self.samples_per_bit)
-        print("DEBUG wave_len =", len(final_wave))
-        print("DEBUG first event =", events[0])
 
         return final_wave, final_labels, events
 
@@ -416,9 +410,6 @@ class RealisticUARTSignalGenerator:
     # (plot_signals 和 save_dataset 函数与之前相同，此处省略以节省空间，可直接复用)
     # ... 请确保保留之前代码中的 save_dataset 和 plot_signals ...
     def save_dataset(self, wave, labels, events, base_dir, prefix="uart"):
-        print("DEBUG [save_dataset]")
-        print("DEBUG save wave_len =", len(wave))
-        print("DEBUG save first event =", events[0])
         os.makedirs(base_dir, exist_ok=True)
         # 文件编号逻辑
         existing_files = [f for f in os.listdir(base_dir) if f.startswith(f"{prefix}-") and f.endswith(".csv")]
@@ -528,3 +519,4 @@ if __name__ == '__main__':
     idx = 0
     tx_ch = all_maps[idx][0]
     gen.plot_signals(all_data[idx][:, tx_ch], all_labels[idx], title="Generated UART (with Error Injection)")
+
