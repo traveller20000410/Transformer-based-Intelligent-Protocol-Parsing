@@ -93,6 +93,21 @@ class RealisticSPISignalGenerator:
         floating_level = 1.0 + walk + noise # 悬空电压通常在中间某处飘荡，不一定是0
         return floating_level
 
+    def add_transition_time(self, signal, rise_factor, fall_factor):
+        result = signal.copy()
+        rise = int(rise_factor * self.base_samples_per_clock)
+        fall = int(fall_factor * self.base_samples_per_clock)
+        edges = np.where(np.diff(signal) != 0)[0]
+        for e in edges:
+            if e + 1 < len(signal):
+                is_rise = signal[e] < signal[e + 1]
+                t_time = rise if is_rise else fall
+                if t_time > 0:
+                    end = min(e + t_time, len(signal) - 1)
+                    if end > e:
+                        result[e:end] = np.linspace(signal[e], signal[end], end - e)
+        return result
+
     def generate_transaction(self):
         self._select_parameters()
         
