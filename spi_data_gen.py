@@ -7,9 +7,11 @@ import csv
 LABEL_MAP = {
     "IDLE": 0,       # CS High, Bus Floating
     "CS_ACTIVE": 1,  # CS Low, Setup/Hold time
-    "DATA_0": 2,     # Logic 0
-    "DATA_1": 3,     # Logic 1
-    "GLITCH": 4      # Noise
+    "DATA_M0_S0": 2,       # MOSI发0，同时 MISO发0
+    "DATA_M0_S1": 3,       # MOSI发0，同时 MISO发1
+    "DATA_M1_S0": 4,       # MOSI发1，同时 MISO发0
+    "DATA_M1_S1": 5,       # MOSI发1，同时 MISO发1
+    "GLITCH": 6            # 噪声/毛刺（备用）
 }
 
 def get_label_name(label_id):
@@ -167,18 +169,23 @@ class RealisticSPISignalGenerator:
                 clk_active = self.v_l if self.cpol else self.v_h
                 v_mosi = self.v_h if bit_mosi else self.v_l
                 v_miso = self.v_h if bit_miso else self.v_l
-                l_mosi = LABEL_MAP['DATA_1'] if bit_mosi else LABEL_MAP['DATA_0']
+                 # [新增] 动态组合标签逻辑
+                if bit_mosi == 0 and bit_miso == 0:
+                    l_combined = LABEL_MAP['DATA_M0_S0']
+                elif bit_mosi == 0 and bit_miso == 1:
+                    l_combined = LABEL_MAP['DATA_M0_S1']
+                elif bit_mosi == 1 and bit_miso == 0:
+                    l_combined = LABEL_MAP['DATA_M1_S0']
+                else:
+                    l_combined = LABEL_MAP['DATA_M1_S1']
 
                 # 根据 CPHA 生成时序
                 if self.cpha == 0:
-                    # Sample @ Edge 1, Change @ Edge 2
-                    # Phase 1: Edge 1 occurs. Data Valid.
                     sclk_bit = np.concatenate([np.full(t_1, clk_active), np.full(t_2, clk_idle)])
                     # Data stable for whole period (simplified)
                     mosi_bit = np.full(t_1 + t_2, v_mosi)
                     miso_bit = np.full(t_1 + t_2, v_miso)
                 else:
-                    # Change @ Edge 1, Sample @ Edge 2
                     sclk_bit = np.concatenate([np.full(t_1, clk_active), np.full(t_2, clk_idle)])
                     mosi_bit = np.full(t_1 + t_2, v_mosi)
                     miso_bit = np.full(t_1 + t_2, v_miso)
@@ -187,7 +194,7 @@ class RealisticSPISignalGenerator:
                 mosi_seq.append(mosi_bit)
                 miso_seq.append(miso_bit)
                 cs_seq.append(np.full(len(sclk_bit), self.v_l))
-                label_seq.append(np.full(len(sclk_bit), l_mosi))
+                label_seq.append(np.full(len(sclk_bit), l_combined))
 
         # --- 4. End Frame ---
         cs_hold = int(self.spb * 2)
