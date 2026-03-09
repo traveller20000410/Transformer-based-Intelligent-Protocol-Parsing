@@ -20,7 +20,7 @@ from transformer_GQA_Teacher import train_model as GQA_train_model # 导入教�
 from transformer_GQA_Student import train_model_distill as GQA_train_model_distill
 
 #定义
-CURRENT_PROTOCOL = 'uart' 
+CURRENT_PROTOCOL = 'i2c' 
 RESUME_TRAINING = False
 DATA_CACHE_PATH = f"cached_data_{CURRENT_PROTOCOL}.npz" # 缓存文件区分协议
 
