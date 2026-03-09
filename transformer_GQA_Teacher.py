@@ -709,15 +709,13 @@ from sklearn.metrics import confusion_matrix
 def plot_confusion_matrix(y_true, y_pred, classes, title='Confusion Matrix', save_path='confusion_matrix.png'):
     cm = confusion_matrix(y_true, y_pred, labels=range(len(classes)))
     cm_norm = cm.astype('float') / (cm.sum(axis=1)[:, np.newaxis] + 1e-10)
-    plt.figure(figsize=(12, 10)) # 图大一点，防止文字挤在一起
-    sns.heatmap(cm_norm, annot=True, fmt=".3f", cmap="Blues", 
-                xticklabels=classes, yticklabels=classes,
-                cbar_kws={'label': 'Scale (Normalized)'})
-    
+
+    plt.figure(figsize=(12, 10))
+    sns.heatmap(cm_norm,annot=True,fmt=".3f",cmap="Blues",xticklabels=classes,yticklabels=classes,cbar_kws={'label': 'Scale (Normalized)'})
     plt.title(title, fontsize=16)
     plt.ylabel('True Label', fontsize=14)
     plt.xlabel('Predicted Label', fontsize=14)
-    plt.xticks(rotation=45, ha='right') # 标签倾斜，防止重叠
+    plt.xticks(rotation=45, ha='right')
     plt.tight_layout()
 
     plt.savefig(save_path, dpi=300)
