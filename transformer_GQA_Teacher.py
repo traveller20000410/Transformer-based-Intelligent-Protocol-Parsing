@@ -710,7 +710,7 @@ def plot_confusion_matrix(y_true, y_pred, classes, title='Confusion Matrix', sav
     cm = confusion_matrix(y_true, y_pred, labels=range(len(classes)))
     cm_norm = cm.astype('float') / (cm.sum(axis=1)[:, np.newaxis] + 1e-10)
     plt.figure(figsize=(12, 10)) # 图大一点，防止文字挤在一起
-    sns.heatmap(cm_norm, annot=True, fmt=".2f", cmap="Blues", 
+    sns.heatmap(cm_norm, annot=True, fmt=".3f", cmap="Blues", 
                 xticklabels=classes, yticklabels=classes,
                 cbar_kws={'label': 'Scale (Normalized)'})
     
