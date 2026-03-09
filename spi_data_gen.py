@@ -45,9 +45,12 @@ DEFAULT_SPI_CONFIG = {
     # [新增] 大小端模式
     'prob_lsb_first': 0.2,    # 20% 概率低位先行
 
-    # [新增] 高阻态模拟
-    'high_z_noise_std': 0.1,  # 悬空时的噪声更大
-    'crosstalk_factor': 0.1
+    #[优化] 高阻态概率配置
+    'prob_high_z': 0.5,        # 50% 概率总线悬空（否则保持高/低电平）
+    'high_z_noise_std': 0.05,  # 降低一点悬空噪声，别太离谱
+    #[优化] 串扰概率配置
+    'prob_crosstalk': 0.3,     # 30% 的波形会出现串扰
+    'crosstalk_factor': 0.08   # 串扰幅度系数
 }
 
 class RealisticSPISignalGenerator:
@@ -89,11 +92,15 @@ class RealisticSPISignalGenerator:
     def _generate_high_z_noise(self, length):
         """模拟高阻态(High-Z)：悬空线会随环境漂移"""
         # 随机游走 + 大底噪
-        walk = np.cumsum(np.random.normal(0, 0.01, length))
-        noise = np.random.normal(0, self.config['high_z_noise_std'], length)
-        # 限制在 -0.5 ~ 3.8 之间
-        floating_level = 1.0 + walk + noise # 悬空电压通常在中间某处飘荡，不一定是0
-        return floating_level
+        if np.random.rand() < self.config['prob_high_z']:
+            # 真实悬空：随机游走 + 较大底噪
+            walk = np.cumsum(np.random.normal(0, 0.005, length))
+            noise = np.random.normal(0, self.config['high_z_noise_std'], length)
+            floating_level = 1.5 + walk + noise # 漂浮在 1.5V 附近
+            return np.clip(floating_level, self.v_l, self.v_h)
+        else:
+            # 弱上拉：只有极其微弱的噪声
+            return np.full(length, self.v_h) + np.random.normal(0, 0.01, length)
 
     def add_transition_time(self, signal, rise_factor, fall_factor):
         result = signal.copy()
@@ -212,10 +219,12 @@ class RealisticSPISignalGenerator:
         labels = np.concatenate(label_seq)
 
         # 添加物理损伤
-        # 1. 串扰
-        diff = np.diff(sclk, prepend=sclk[0]) * self.config['crosstalk_factor']
-        mosi += diff
-        miso += diff
+        # 1. 随机串扰注入 (并不是所有线缆都有严重串扰)
+        if np.random.rand() < self.config['prob_crosstalk']:
+            # 只在跳变沿注入一定比例的尖峰
+            diff = np.diff(sclk, prepend=sclk[0]) * self.config['crosstalk_factor']
+            mosi += diff
+            miso += diff
         
         # 2. 高斯底噪
         noise_std = self.config['voltage_noise_std']
